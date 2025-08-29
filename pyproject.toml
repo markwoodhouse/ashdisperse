@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ashdisperse"
+version = "0.7.0"
+authors = [
+    { name = "Mark J. Woodhouse", email = "mark.woodhouse@bristol.ac.uk" },
+]
+description = "Steady state advection-diffusion-sedimentation solver for volcanic ash dispersion"
+readme = "README.rst"
+requires-python = ">=3.10"
+license = {file = "LICENCE"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy",
+    "numba",
+    "ttb",
+    # "intel-openmp;platform_system=='Darwin'",
+    "scipy",
+    "toml",
+    "matplotlib",
+    "netCDF4",
+    "h5netcdf",
+    "datetime",
+    "utm",
+    "rasterio",
+    "scikit-image",
+    "pandas",
+    "geopandas",
+    "cdsapi>=0.7.2",
+    "prompt_toolkit",
+    "siphon",
+    "cfgrib",
+    "xarray",
+    "rioxarray",
+    "requests",
+    "contextily",
+    "osmnx",
+    "folium",
+    "notebook",
+    "metpy",
+    "seaborn",
+    "windrose",
+]
+
+[project.optional-dependencies]
+
+[project.urls]
+Homepage = "https://bitbucket.org/markwoodhouse/ashdisperse"
+Issues = "https://bitbucket.org/markwoodhouse/ashdisperse/admin/issues"
+
+[project.scripts]
+ashdisperse_nb="ashdisperse.scripts.run_ashdisperse_nb:run_example"
+ashdisperse_clean="ashdisperse.scripts.clean:clean"
+

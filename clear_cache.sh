@@ -1,0 +1,13 @@
+rm ashdisperse/__pycache__/*
+rm ashdisperse/config/__pycache__/*
+rm ashdisperse/containers/__pycache__/*
+rm ashdisperse/core/__pycache__/*
+rm ashdisperse/data/__pycache__/*
+rm ashdisperse/interface/__pycache__/*
+rm ashdisperse/mapping/__pycache__/*
+rm ashdisperse/met/__pycache__/*
+rm ashdisperse/notebooks/__pycache__/*
+rm ashdisperse/params/__pycache__/*
+rm ashdisperse/scripts/__pycache__/*
+rm ashdisperse/solver/__pycache__/*
+rm ashdisperse/utilities/__pycache__/*
