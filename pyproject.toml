@@ -52,8 +52,10 @@ dependencies = [
 [project.optional-dependencies]
 
 [project.urls]
-Homepage = "https://bitbucket.org/markwoodhouse/ashdisperse"
-Issues = "https://bitbucket.org/markwoodhouse/ashdisperse/admin/issues"
+Repository = "https://github.com/markwoodhouse/ashdisperse/"
+Issues = "https://github.com/markwoodhouse/ashdisperse/issues"
+Changelog = "https://github.com/markwoodhouse/ashdisperse/blob/main/CHANGELOG.md"
+
 
 [project.scripts]
 ashdisperse_nb="ashdisperse.scripts.run_ashdisperse_nb:run_example"
