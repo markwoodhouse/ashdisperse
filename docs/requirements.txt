@@ -16,35 +16,21 @@ click==8.2.1
     # via sphinx-click
 docutils==0.20.1
     # via
-    #   pybtex-docutils
     #   sphinx
     #   sphinx-click
     #   sphinx-rtd-theme
-    #   sphinxcontrib-bibtex
 idna==3.10
     # via requests
 imagesize==1.4.1
     # via sphinx
 jinja2==3.1.6
     # via sphinx
-latexcodec==3.0.1
-    # via pybtex
 markupsafe==3.0.2
     # via jinja2
 packaging==25.0
     # via sphinx
-pillow==11.3.0
-    # via sphinx-gallery
-pybtex==0.25.1
-    # via
-    #   pybtex-docutils
-    #   sphinxcontrib-bibtex
-pybtex-docutils==1.0.3
-    # via sphinxcontrib-bibtex
 pygments==2.19.2
     # via sphinx
-pyyaml==6.0.2
-    # via pybtex
 requests==2.32.5
     # via sphinx
 snowballstemmer==3.0.1
@@ -54,16 +40,12 @@ sphinx==7.4.7
     #   -r requirements.in
     #   sphinx-click
     #   sphinx-copybutton
-    #   sphinx-gallery
     #   sphinx-notfound-page
     #   sphinx-rtd-theme
-    #   sphinxcontrib-bibtex
     #   sphinxcontrib-jquery
 sphinx-click==6.0.0
     # via -r requirements.in
 sphinx-copybutton==0.5.2
-    # via -r requirements.in
-sphinx-gallery==0.17.1
     # via -r requirements.in
 sphinx-notfound-page==1.0.4
     # via -r requirements.in
@@ -71,8 +53,6 @@ sphinx-rtd-theme==2.0.0
     # via -r requirements.in
 sphinxcontrib-applehelp==2.0.0
     # via sphinx
-sphinxcontrib-bibtex==2.6.2
-    # via -r requirements.in
 sphinxcontrib-devhelp==2.0.0
     # via sphinx
 sphinxcontrib-htmlhelp==2.1.0

@@ -3,5 +3,5 @@ sphinx-notfound-page==1.0.4
 sphinx-rtd-theme==2.0.0
 sphinx-click==6.0.0
 sphinx-copybutton==0.5.2
-sphinx-gallery==0.17.1
-sphinxcontrib-bibtex==2.6.2
+# sphinx-gallery==0.17.1
+# sphinxcontrib-bibtex==2.6.2
