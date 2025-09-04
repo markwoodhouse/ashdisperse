@@ -44,8 +44,14 @@ release = main_ns['__version__']
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = [
-    'nbsphinx',
-    'sphinx.ext.autodoc'
+    'sphinx.ext.autodoc',
+    'sphinx_click',
+    'sphinx_rtd_theme',
+    'sphinx_copybutton',
+    'sphinx_gallery.gen_gallery',
+    'sphinx.ext.autosectionlabel',
+    'sphinxcontrib.bibtex',
+    'notfound.extension',
 ]
 
 # Add any paths that contain templates here, relative to this directory.
