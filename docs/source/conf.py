@@ -48,9 +48,9 @@ extensions = [
     'sphinx_click',
     'sphinx_rtd_theme',
     'sphinx_copybutton',
-    'sphinx_gallery.gen_gallery',
+    # 'sphinx_gallery.gen_gallery',
     'sphinx.ext.autosectionlabel',
-    'sphinxcontrib.bibtex',
+    # 'sphinxcontrib.bibtex',
     'notfound.extension',
 ]
 
