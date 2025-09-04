@@ -270,6 +270,8 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
     Ng = params.grains.bins
     Nz = params.output.Nz
 
+    zeros_Nz = np.zeros(Nz, dtype=np.complex128)
+
     fft_tol = params.solver.fft_tol
 
     conc_0_fft = np.zeros((Ny, Nx//2+1, Ng), dtype=np.complex128)
@@ -290,33 +292,46 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
         #k = idx % Ng          # Compute k
         k = Ng - 1 - (idx % Ng) # Compute k in reverse
 
-        if (i<=Xstop[k] and j<=Ystop[k]):
+        # skip if outside current adaptive stop
+        if (i > Xstop[k]) or (j > Ystop[k]):
+            conc_0_fft[j, i, k] = 0.0 + 0.0j
+            conc_z_fft[j, i, :, k] = zeros_Nz
+            conc_0_fft[j_upper, i, k] = 0.0 + 0.0j
+            conc_z_fft[j_upper, i, :, k] = zeros_Nz
+            continue
 
-            conc_0_mode_fft, conc_z_mode_fft = ade_mode_solve_grain(k,
-                    kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities
-                )
-            
-            conc_0_fft[j, i, k] = conc_0_mode_fft
-            conc_z_fft[j, i, :, k] = conc_z_mode_fft
-            
-            conc_0_mode_fft_upper, conc_z_mode_fft_upper = ade_mode_solve_grain(k,
-                    kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities
-                )
-        
+        # compute mode for (i,j)
+        conc_0_mode_fft, conc_z_mode_fft = ade_mode_solve_grain(
+            k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities
+        )
+
+        conc_0_fft[j, i, k] = conc_0_mode_fft
+        conc_z_fft[j, i, :, k] = conc_z_mode_fft
+
+        # compute mirrored mode for j_upper only if not already computed
+        if j_upper != j:
+            conc_0_mode_fft_upper, conc_z_mode_fft_upper = ade_mode_solve_grain(
+                k, kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities
+            )
             conc_0_fft[j_upper, i, k] = conc_0_mode_fft_upper
             conc_z_fft[j_upper, i, :, k] = conc_z_mode_fft_upper
-
-            if i==0:
-                if np.absolute(conc_0_mode_fft)< fft_tol and np.absolute(conc_0_mode_fft_upper) < fft_tol:
-                    Ystop[k] = np.minimum(j, Ystop[k])
-            if j==0:
-                if 0 < np.absolute(conc_0_mode_fft) < fft_tol:
-                    Xstop[k] = np.minimum(i, Xstop[k])
         else:
-            conc_0_fft[j, i, k] = np.complex128(0.0)
-            conc_z_fft[j, i, :, k] = np.zeros((Nz), dtype=np.complex128)
-            conc_0_fft[j_upper, i, k] = np.complex128(0.0)
-            conc_z_fft[j_upper, i, :, k] = np.zeros((Nz), dtype=np.complex128)
+            # diagonal (Ny odd), copy
+            conc_0_fft[j_upper, i, k] = conc_0_mode_fft
+            conc_z_fft[j_upper, i, :, k] = conc_z_mode_fft
+
+        # update adaptive stop indices based on FFT tolerance
+        if i == 0:
+            if np.abs(conc_0_mode_fft) < fft_tol:
+                if j_upper != j:
+                    if np.abs(conc_0_mode_fft_upper) < fft_tol:
+                        Ystop[k] = min(j, Ystop[k])
+                else:
+                    Ystop[k] = min(j, Ystop[k])
+
+        if j == 0:
+            if 0.0 < np.abs(conc_0_mode_fft) < fft_tol:
+                Xstop[k] = min(i, Xstop[k])
     
     return conc_0_fft, conc_z_fft
 
@@ -341,112 +356,123 @@ def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, 
 
     Ny_old = conc_0_fft_old.shape[0]
     half_Nx_old = conc_0_fft_old.shape[1] - 1
-
     Nx_old = half_Nx_old * 2
     half_Ny_old = Ny_old // 2
 
     Nx = kx.size
     Ny = ky.size
-
-    half_Nx = Nx // 2 # Only need the non-negative modes but symmetry of FFT of real-valued function
+    half_Nx = Nx // 2
     half_Ny = (Ny + 1) // 2
-
     Ng = params.grains.bins
     Nz = params.output.Nz
-
     fft_tol = params.solver.fft_tol
+    zeros_Nz = np.zeros(Nz, dtype=np.complex128)
 
-    Xstop = (Nx//2+1) * np.ones((Ng), dtype=np.int64)
-    Ystop = Ny//2 * np.ones((Ng), dtype=np.int64)
+    Xstop = (Nx//2+1) * np.ones(Ng, dtype=np.int64)
+    Ystop = Ny//2 * np.ones(Ng, dtype=np.int64)
 
     conc_0_fft = np.zeros((Ny, half_Nx+1, Ng), dtype=np.complex128)
-    conc_z_fft = np.zeros((Ny, Nx+1, Nz, Ng), dtype=np.complex128)
+    conc_z_fft = np.zeros((Ny, half_Nx+1, Nz, Ng), dtype=np.complex128)
 
-    N = (Nx//2 + 1) * (half_Ny) * Ng
-    for idx in prange(N):
-        i = idx // (half_Ny * Ng)  # Compute i
-        j = (idx // Ng) % (half_Ny)  # Compute j
-        j_upper = Ny - j - 1  # Mirror j
-        k = idx % Ng          # Compute k
+    # Optional: moving-window for predictive skipping
+    window_size = 5
+    ksq_window = np.zeros((Ng, window_size), dtype=np.float64)
+    log_window = np.zeros((Ng, window_size), dtype=np.float64)
+    window_count = np.zeros(Ng, dtype=np.int64)
+    window_index = np.zeros(Ng, dtype=np.int64)
+    max_conc0 = np.zeros(Ng, dtype=np.float64)
 
-        j_upper = Ny - j - 1 # Mirror j
-        j_upper_old = Ny_old - j - 1 # Mirror j
+    N_total = (half_Nx+1) * half_Ny * Ng
+    for idx in prange(N_total):
+        i = idx // (half_Ny * Ng)
+        j = (idx // Ng) % half_Ny
+        j_upper = Ny - j - 1
+        k = Ng - 1 - (idx % Ng)
 
+        j_upper_old = Ny_old - j - 1
         is_special = (i == 0) or (j == 0)
 
-        if full:
-            if (not is_special and i<half_Nx_old and j<half_Ny_old):
-            
-                if np.absolute(conc_0_fft_old[j, i, k])<fft_tol:
-                    conc_0_mode_fft, conc_z_mode_fft = ade_mode_solve_grain(k,
-                        kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities
-                    )
-                else:
-                    conc_0_mode_fft = conc_0_fft_old[j, i, k]
-                    conc_z_mode_fft = conc_z_fft_old[j, i, :, k]
+        # Determine whether to use old solution or recompute
+        use_old = False
+        if not full and (not is_special) and (i < half_Nx_old) and (j < half_Ny_old):
+            if np.abs(conc_0_fft_old[j, i, k]) >= fft_tol:
+                use_old = True
 
-                if np.absolute(conc_0_fft_old[j, i, k])<fft_tol:
-                    conc_0_mode_fft_upper, conc_z_mode_fft_upper = ade_mode_solve_grain(k,
-                        kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities
-                    )
-                else:
-                    conc_0_mode_fft_upper = conc_0_fft_old[j_upper_old, i, k]
-                    conc_z_mode_fft_upper = conc_z_fft_old[j_upper_old, i, :, k]
-        
-            else:
-                conc_0_mode_fft, conc_z_mode_fft = ade_mode_solve_grain(k,
-                    kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities
-                )
-                
-                conc_0_mode_fft_upper, conc_z_mode_fft_upper = ade_mode_solve_grain(k,
-                    kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities
-                )
-            
-            conc_0_fft[j, i, k] = conc_0_mode_fft
-            conc_z_fft[j, i, :, k] = conc_z_mode_fft
-
-            conc_0_fft[j_upper, i, k] = conc_0_mode_fft_upper
-            conc_z_fft[j_upper, i, :, k] = conc_z_mode_fft_upper
-        
+        if use_old:
+            conc_0_mode_fft = conc_0_fft_old[j, i, k]
+            conc_z_mode_fft = conc_z_fft_old[j, i, :, k]
+            conc_0_mode_fft_upper = conc_0_fft_old[j_upper_old, i, k]
+            conc_z_mode_fft_upper = conc_z_fft_old[j_upper_old, i, :, k]
         else:
-            if (not is_special and i<half_Nx_old and j<half_Ny_old):
-                
-                conc_0_mode_fft = conc_0_fft_old[j, i, k]
-                conc_z_mode_fft = conc_z_fft_old[j, i, :, k]
+            # --- Predictive skip using moving window ---
+            skip_mode = False
+            if window_count[k] >= 3:
+                # Linear fit log(abs(conc)) = slope*ksq + intercept
+                n_points = window_count[k]
+                sx = 0.0
+                sy = 0.0
+                sxx = 0.0
+                sxy = 0.0
+                for w in range(n_points):
+                    idx_w = (window_index[k] - n_points + w) % window_size
+                    xw = ksq_window[k, idx_w]
+                    yw = log_window[k, idx_w]
+                    sx += xw
+                    sy += yw
+                    sxx += xw * xw
+                    sxy += xw * yw
+                denom = n_points * sxx - sx * sx
+                if denom != 0.0:
+                    slope = (n_points * sxy - sx * sy) / denom
+                    intercept = (sy - slope * sx) / n_points
+                    ksq = kx[i]**2 + ky[j]**2
+                    log_pred = slope * ksq + intercept
+                    conc_pred = np.exp(log_pred)
+                    if conc_pred < fft_tol:
+                        skip_mode = True
 
-                conc_0_mode_fft_upper = conc_0_fft_old[j_upper_old, i, k]
-                conc_z_mode_fft_upper = conc_z_fft_old[j_upper_old, i, :, k]
-
+            if skip_mode:
+                conc_0_mode_fft = 0.0 + 0.0j
+                conc_z_mode_fft = zeros_Nz
+                conc_0_mode_fft_upper = 0.0 + 0.0j
+                conc_z_mode_fft_upper = zeros_Nz
+                Xstop[k] = min(i, Xstop[k])
+                Ystop[k] = min(j, Ystop[k])
             else:
-                if (i<=Xstop[k] and j<=Ystop[k]):
+                # --- Recompute mode ---
+                conc_0_mode_fft, conc_z_mode_fft = ade_mode_solve_grain(
+                    k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities
+                )
+                conc_0_mode_fft_upper, conc_z_mode_fft_upper = ade_mode_solve_grain(
+                    k, kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities
+                )
 
-                    conc_0_mode_fft, conc_z_mode_fft = ade_mode_solve_grain(k,
-                        kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities
-                    )
+                # --- Update moving window ---
+                abs_mode = np.abs(conc_0_mode_fft)
+                if abs_mode > 0.0:
+                    ksq_val = kx[i]**2 + ky[j]**2
+                    window_idx = window_index[k] % window_size
+                    ksq_window[k, window_idx] = ksq_val
+                    log_window[k, window_idx] = np.log(abs_mode)
+                    window_index[k] += 1
+                    if window_count[k] < window_size:
+                        window_count[k] += 1
+                if abs_mode > max_conc0[k]:
+                    max_conc0[k] = abs_mode
 
-                    conc_0_mode_fft_upper, conc_z_mode_fft_upper = ade_mode_solve_grain(k,
-                        kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities
-                    )
+                # --- Update adaptive stops ---
+                if i == 0 and abs_mode < fft_tol:
+                    if np.abs(conc_0_mode_fft_upper) < fft_tol:
+                        Ystop[k] = min(j, Ystop[k])
+                if j == 0 and 0.0 < abs_mode < fft_tol:
+                    Xstop[k] = min(i, Xstop[k])
 
-                    if i==0:
-                        if np.absolute(conc_0_mode_fft)< fft_tol and np.absolute(conc_0_mode_fft_upper) < fft_tol:
-                            Ystop[k] = np.minimum(j, Ystop[k])
-                    if j==0:
-                        if 0 < np.absolute(conc_0_mode_fft) < fft_tol:
-                            Xstop[k] = np.minimum(i, Xstop[k])
-                
-                else:
-                    conc_0_mode_fft = np.complex128(0.0)
-                    conc_z_mode_fft = np.zeros((Nz), dtype=np.complex128)
-                    conc_0_mode_fft_upper = np.complex128(0.0)
-                    conc_z_mode_fft_upper = np.zeros((Nz), dtype=np.complex128)
-            
-            conc_0_fft[j, i, k] = conc_0_mode_fft
-            conc_z_fft[j, i, :, k] = conc_z_mode_fft
+        # --- Save results ---
+        conc_0_fft[j, i, k] = conc_0_mode_fft
+        conc_z_fft[j, i, :, k] = conc_z_mode_fft
+        conc_0_fft[j_upper, i, k] = conc_0_mode_fft_upper
+        conc_z_fft[j_upper, i, :, k] = conc_z_mode_fft_upper
 
-            conc_0_fft[j_upper, i, k] = conc_0_mode_fft_upper
-            conc_z_fft[j_upper, i, :, k] = conc_z_mode_fft_upper
-            
     return conc_0_fft, conc_z_fft
 
 # @njit(

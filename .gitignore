@@ -1,0 +1,10 @@
+*.nc
+old_setup.py
+.ipynb_checkpoints/*
+.vscode/*
+ashdisperse/__pycache__/*
+ashdisperse/*/__pycache__/*
+ashdisperse/notebooks/.ipynb_checkpoints/ashdisperse-checkpoint.ipynb
+ashdisperse.egg-info/*
+dist/*
+docs/build/*

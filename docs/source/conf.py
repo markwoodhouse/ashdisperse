@@ -12,7 +12,10 @@
 #
 import os
 import sys
-sys.path.insert(0, os.path.abspath('../ashdisperse'))
+from pathlib import Path
+
+# sys.path.insert(0, os.path.abspath('../ashdisperse'))
+sys.path.insert(0, str(Path('..','ashdisperse').resolve()))
 from distutils.util import convert_path
 
 abspath = os.path.abspath(__file__)

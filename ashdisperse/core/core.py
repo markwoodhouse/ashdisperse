@@ -7,7 +7,7 @@ from ..containers.cheb import ChebContainer_type
 from ..containers.velocities import VelocityContainer_type
 from ..met.met import MetData_type
 from ..params.params import Parameters_type
-from ..spectral.cheb import convergedCoeffs
+from ..spectral.cheb import truncateCoeffs
 from .getters import (Source_z_dimless, lower_dWsdz, lower_U, lower_V,
                       lower_Ws, upper_dWsdz, upper_U, upper_V, upper_Ws)
 
@@ -39,7 +39,7 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
     Ly = parameters.model.Ly[grain_i]
-    Pe = parameters.model.Peclet_number
+    Pe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
     Vratio = parameters.model.Velocity_ratio[grain_i]
     R = parameters.model.Diffusion_ratio
 
@@ -91,9 +91,9 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
 
         coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
 
-        co0 = convergedCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon)
-        co1 = convergedCoeffs(coeffs[:, 1].flatten(), parameters.solver.epsilon)
-        co2 = convergedCoeffs(coeffs[:, 2].flatten(), parameters.solver.epsilon)
+        co0 = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
+        co1 = truncateCoeffs(coeffs[:, 1].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
+        co2 = truncateCoeffs(coeffs[:, 2].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
 
         if (co0.size < N) and (co1.size < N) and (co2.size < N):
             break
@@ -121,7 +121,7 @@ def LowerODE_f(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
     Ly = parameters.model.Ly[grain_i]
-    Pe = parameters.model.Peclet_number
+    Pe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
     Vratio = parameters.model.Velocity_ratio[grain_i]
     R = parameters.model.Diffusion_ratio
 
@@ -167,7 +167,7 @@ def LowerODE_f(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
 
         coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
 
-        co0 = convergedCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon)
+        co0 = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
 
         if co0.size < N:
             break
@@ -194,7 +194,7 @@ def LowerODE_0(kx, ky, grain_i, cheby, parameters, velocities, b_indx, b_m):
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
     Ly = parameters.model.Ly[grain_i]
-    Pe = parameters.model.Peclet_number
+    Pe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
     Vratio = parameters.model.Velocity_ratio[grain_i]
     R = parameters.model.Diffusion_ratio
 
@@ -233,7 +233,7 @@ def LowerODE_0(kx, ky, grain_i, cheby, parameters, velocities, b_indx, b_m):
 
         coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
 
-        co = convergedCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon)
+        co = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
 
         if co.size < N:
             break
@@ -260,7 +260,7 @@ def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
     Ly = parameters.model.Ly[grain_i]
-    Pe = parameters.model.Peclet_number
+    Pe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
     Vratio = parameters.model.Velocity_ratio[grain_i]
     R = parameters.model.Diffusion_ratio
 
@@ -302,7 +302,7 @@ def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
 
         coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
 
-        co = convergedCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon)
+        co = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
 
         if co.size < N:
             break

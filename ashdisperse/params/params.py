@@ -106,6 +106,7 @@ def copy_parameters(A):
         minN_log2=A.solver.minN_log2,
         maxN_log2=A.solver.maxN_log2,
         epsilon=A.solver.epsilon,
+        plateau_factor=A.solver.plateau_factor,
         fft_tol=A.solver.fft_tol,
         Nx_log2=A.solver.Nx_log2,
         Ny_log2=A.solver.Ny_log2,
@@ -145,6 +146,7 @@ def update_parameters(
     minN_log2=None,
     maxN_log2=None,
     epsilon=None,
+    plateau_factor=None,
     fft_tol=None,
     Nx_log2=None,
     Ny_log2=None,
@@ -174,6 +176,8 @@ def update_parameters(
         A.solver.minN_log2 = minN_log2
     if maxN_log2 is not None:
         A.solver.maxN_log2 = maxN_log2
+    if plateau_factor is not None:
+        A.solver.plateau_factor = plateau_factor
     if epsilon is not None:
         A.solver.epsilon = epsilon
     if fft_tol is not None:
@@ -432,6 +436,7 @@ def parameters_from_dict(paramset: dict) -> Parameters_type:
         minN_log2=paramset["solver"]["minN_log2"],
         maxN_log2=paramset["solver"]["maxN_log2"],
         epsilon=paramset["solver"]["epsilon"],
+        plateau_factor=paramset["solver"]["plateau_factor"],
         fft_tol=paramset["solver"]["fft_tol"],
         Nx_log2=paramset["solver"]["Nx_log2"],
         Ny_log2=paramset["solver"]["Ny_log2"],

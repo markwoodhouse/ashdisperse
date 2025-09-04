@@ -56,11 +56,9 @@ class ModelParameters:
         
         N = met_params.Ws_scale.shape[0]
         
-        Peclet_number = (
-            physical_params.Kappa_h / met_params.U_scale / source_params.PlumeHeight
-        )
+        Pe = (met_params.U_scale * source_params.PlumeHeight / physical_params.Kappa_h) # Peclet number
         Diffusion_ratio = physical_params.Kappa_h / physical_params.Kappa_v
-        self.Peclet_number = Peclet_number
+        self.Peclet_number = Pe
         self.Diffusion_ratio = Diffusion_ratio
 
         self._empty_lists(N)

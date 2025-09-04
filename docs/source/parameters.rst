@@ -353,7 +353,7 @@ Model parameters
 .. _met_params:
 
 Meteorological parameters
-----------------
+-------------------------
 
 The model parameters require characteristic scales from the meteorological data.  These are stored in the ``parameters.met`` object and are:
 

@@ -1,3 +1,4 @@
+
 from collections import OrderedDict
 
 import numpy as np
@@ -12,6 +13,7 @@ solver_spec["maxN_log2"] = int64  # log2 maximum number of Chebyshev points
 solver_spec["Nx_log2"] = int64  # log2 of number of points in x
 solver_spec["Ny_log2"] = int64  # log2 of number of points in y
 solver_spec["epsilon"] = float64  # tolerance for converged spectral series
+solver_spec["plateau_factor"] = float64  # factor above noise plateau to treat as meaningful (e.g. 10 for conservative, 3 for aggressive)
 solver_spec["fft_tol"] = float64  # tolerance for fft terms
 solver_spec["meps"] = float64  # Machine epsilon
 
@@ -27,6 +29,7 @@ class SolverParameters:
         Nx_log2=8,
         Ny_log2=8,
         epsilon=1e-8,
+        plateau_factor=10.0,
         fft_tol=1e-10,
     ):
         self.meps = np.finfo(np.float64).eps
@@ -41,6 +44,7 @@ class SolverParameters:
         self.Ny_log2 = np.int64(Ny_log2)  # y-resolution (log2)
 
         self.epsilon = np.float64(epsilon)
+        self.plateau_factor = np.float64(plateau_factor)
         self.fft_tol = np.float64(fft_tol)
 
     def validate(self):
@@ -60,16 +64,19 @@ class SolverParameters:
             raise ValueError("In SolverParameters, must have Ny_log2>0")
         if self.epsilon < 0:
             raise ValueError("In SolverParameters, must have epsilon>0")
-        if self.epsilon < 10 * self.meps:
-            raise ValueError(
-                f"In SolverParameters, must have epsilon >= 10*machine epsilon = {10 * self.meps}"
-            )
+        if self.plateau_factor < 1:
+            raise ValueError("In SolverParameters, must have plateau_factor>=1")
+        if self.epsilon < self.meps:
+            print(
+                f"In SolverParameters, must have epsilon >= machine epsilon = {self.meps}\n \
+                Setting epsilon = {self.meps}")
+            self.epsilon = self.meps
         if self.fft_tol < 0:
             raise ValueError("In SolverParameters, must have fft_tol>0")
-        if self.fft_tol < 10 * self.meps:
-            raise ValueError(
-                f"In SolverParameters, must have fft_tol >= 10*machine epsilon = {10 * self.meps}"
-            )
+        # if self.fft_tol < 10 * self.meps:
+        #     raise ValueError(
+        #         f"In SolverParameters, must have fft_tol >= 10*machine epsilon = {10 * self.meps}"
+        #     )
         return 1        
 
     @property
@@ -112,6 +119,7 @@ class SolverParameters:
         )
         print("  Number of Chebyshev iterates = ", self.chebIts)
         print("  Tolerance for Chebyshev series, epsilon = ", self.epsilon)
+        print("  Noise plateau factor for Chebyshev series, plateau_factor = ", self.plateau_factor)
         print("  Tolerance for FFT terms, fft_tol = ", self.fft_tol)
         print("  Resolution in x, Nx = ", self.Nx, " (Nx_log2 = ", self.Nx_log2, ")")
         print("  Resolution in y, Ny = ", self.Ny, " (Ny_log2 = ", self.Ny_log2, ")")
@@ -130,6 +138,7 @@ def _solver_dict(p):
         'Nx_log2': int(p.Nx_log2),
         'Ny_log2': int(p.Ny_log2),
         'epsilon': float(p.epsilon),
+        'plateau_factor': float(p.plateau_factor),
         'fft_tol': float(p.fft_tol),
     }
 
@@ -142,6 +151,7 @@ def _solver_params_equal(p1: SolverParameters, p2: SolverParameters) -> bool:
         (p1.Nx_log2 == p2.Nx_log2) and
         (p1.Ny_log2 == p2.Ny_log2) and
         (p1.epsilon == p2.epsilon) and
+        (p1.plateau_factor == p2.plateau_factor) and
         (p1.fft_tol == p2.fft_tol)
     )
     return test

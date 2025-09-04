@@ -729,6 +729,7 @@ def set_model_parameters(params, met, square=False):
     xScale = np.zeros((params.grains.bins))
     yScale = np.zeros((params.grains.bins))
     dispersal_distance = estimate_dispersal_distance(params, met)
+
     for j in range(params.grains.bins):
 
         if np.amax(dispersal_distance[j,:])>1000e3:
@@ -736,6 +737,7 @@ def set_model_parameters(params, met, square=False):
         
         xScale[j] = dispersal_distance[j,0] + params.source.radius*3
         yScale[j] = dispersal_distance[j,1] + params.source.radius*3
+
         if square:
             xScale[j] = np.maximum(xScale[j],yScale[j])
             yScale[j] = xScale[j]

@@ -9,7 +9,10 @@ Installation
 .. note::
     To use *AshDisperse*, it is recommended to use a virtual environment (here called ``ash``).
 
-First, install AshDisperse using pip:
+.. note::
+    If using conda, it is recommended to first install the numpy, numba and tbb dependencies from conda-forge to ensure system-compatible packages are installed prior to installing *AshDisperse*.
+
+AshDisperse can be installed from PyPI using pip:
 
 .. code-block:: console
 
@@ -17,6 +20,10 @@ First, install AshDisperse using pip:
 
 This will install the package along with dependencies.
 
+Jupyter notebook example
+------------------------
+
+Installing AshDisperse will also download an example of use in a Jupyter notebook and create a command-line function `ashdisperse_nb` to launch  the notebook.
 
 Command-line invocation
 -----------------------

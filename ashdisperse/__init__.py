@@ -1,4 +1,4 @@
-from pkg_resources import resource_filename
+import importlib_resources
 
 from ashdisperse.ashdisperse import load_result, refine, setup, solve
 from ashdisperse.core import AshDisperseResult
@@ -50,8 +50,7 @@ def __initialize__():
     params.output.set_altitudes()
     params.output.ChebMats(params.solver.maxN, params.source.PlumeHeight)
 
-    metdata = resource_filename(__name__, "/data/metdata.npz")
-
+    metdata = importlib_resources.files(__name__).joinpath('data/metdata.npz')
     met = load_met(metdata)
 
     return params, met

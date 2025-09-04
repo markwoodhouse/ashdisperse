@@ -299,11 +299,15 @@ def _add_windrose_to_ax(ax, data, spd_bins,
 
 
 def _get_spd_bins(max_speed: float, calm_limit: float=0.1, intervals: int=5) -> list[float]:
-    spd_bins = [0.1]
+    spd_bins = [calm_limit]
     r = 1.0/intervals
     for k in range(1,intervals):
         spd_bins.append(nice_round_down(max_speed*r*k, 1))
     spd_bins.append(nice_round_up(max_speed, 1))
+
+    spd_bins = list(dict.fromkeys(spd_bins))
+    spd_bins = [s for s in spd_bins if s>=calm_limit]
+
     return spd_bins
 
 def plot_windroses(data: MetRepo | pd.DataFrame, altitudes: list[float], 

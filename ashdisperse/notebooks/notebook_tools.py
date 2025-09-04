@@ -1,6 +1,6 @@
 import subprocess
 
-from pkg_resources import resource_filename
+import importlib_resources
 
 
 def run_notebook(file):
@@ -8,6 +8,8 @@ def run_notebook(file):
 
 
 def launch_jupyter_example():
-    file = resource_filename(__name__, "/ashdisperse.ipynb")
-    print(f"Running {file}")
-    run_notebook(file)
+    ref = importlib_resources.files('ashdisperse.notebooks') / 'ashdisperse.ipynb'
+    with importlib_resources.as_file(ref) as path:
+        print(f"Running {path}")
+        run_notebook(path)
+        

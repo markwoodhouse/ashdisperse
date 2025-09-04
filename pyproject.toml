@@ -4,20 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ashdisperse"
-version = "0.7.0"
+version = "0.7.3"
 authors = [
     { name = "Mark J. Woodhouse", email = "mark.woodhouse@bristol.ac.uk" },
 ]
 description = "Steady state advection-diffusion-sedimentation solver for volcanic ash dispersion"
 readme = "README.rst"
 requires-python = ">=3.10"
-license = {file = "LICENCE"}
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "importlib_resources",
     "numpy",
     "numba",
     "ttb",
