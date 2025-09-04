@@ -78,17 +78,17 @@ html_static_path = ['_static']
 
 # --- Options for sphinx-gallery
 
-sphinx_gallery_conf = {
-    'examples_dirs': '../../examples',
-    'gallery_dirs': 'gallery',
-    'filename_pattern':'example',
-    'example_extensions': {'.py'},
-    'capture_repr': ('_repr_html_','__repr__'),
-    'thumbnail_size': (500,500),
-}
+# sphinx_gallery_conf = {
+#     'examples_dirs': '../../examples',
+#     'gallery_dirs': 'gallery',
+#     'filename_pattern':'example',
+#     'example_extensions': {'.py'},
+#     'capture_repr': ('_repr_html_','__repr__'),
+#     'thumbnail_size': (500,500),
+# }
 
 # --- Options for sphinxcontrib-bibtex
 
-bibtex_bibfiles = ['ashdisperse.bib']
-bibtex_reference_style = 'author_year'
-bibtex_tooltips = True
+# bibtex_bibfiles = ['ashdisperse.bib']
+# bibtex_reference_style = 'author_year'
+# bibtex_tooltips = True
