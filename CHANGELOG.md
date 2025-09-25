@@ -12,3 +12,9 @@ All notable changes to this project will be documented in this file.
 
 ### Updates
 - removed depreciated pkg_resources dependency and replaced with importlib_resources
+
+## [0.7.4] - 2025-09-25
+
+### Updates
+- replaced importlib_resources with importlib.resources
+- added tools to read radiosonde met data downloaded files from Wyoming Weather Web

@@ -1,8 +1,9 @@
+import linecache
 import os
 from collections import OrderedDict
 from datetime import datetime
 from math import ceil, floor
-from typing import Optional, Literal
+from typing import Literal, Optional
 
 import matplotlib.pyplot as plt
 import metpy.calc as metcalc
@@ -19,8 +20,9 @@ from numba.experimental import jitclass
 from numba.types import Tuple, unicode_type
 from scipy.integrate import solve_ivp
 
-from ashdisperse.met.met_netcdf import NetcdfMet
 from ashdisperse.met.met_gfs import GFSarchive, GFSforecast
+from ashdisperse.met.met_netcdf import NetcdfMet
+
 from ..params.params import Parameters_type
 from ..queryreport import print_text
 from ..utilities.utilities import (SA_Density_array, SA_Density_value,
@@ -508,6 +510,70 @@ def load_met_from_repodf(met_dataset: pd.DataFrame, indx: int) -> MetData:
 
     return met
 
+def read_wyoming_legacy_radiosonde(fname: str) -> MetData:
+    if not os.path.exists(fname):
+        raise FileExistsError(f"{fname} not found")
+    columns = dict(zip(linecache.getline(fname,2).split(),linecache.getline(fname, 3).split()))
+    rs = pd.read_csv(fname, sep="\\s+", skiprows=[0,2,3], usecols=list(columns.keys()))
+    for col, unit in columns.items():
+        if unit=='C':
+            unit = 'degC'
+        rs[col] = rs.apply(lambda row: row[col]*units.units(unit), axis=1)    
+    rs[['U','V']] = rs.apply(lambda row: metcalc.wind_components(row['SKNT'], row['DRCT']), axis=1, result_type='expand')
+    rs['MIXRATIO'] = rs.apply(lambda row: metcalc.mixing_ratio_from_relative_humidity(row['PRES'], row['TEMP'], row['RELH']), axis=1)
+    rs['RHO'] = rs.apply(lambda row: metcalc.density(row['PRES'], row['TEMP'], row['MIXRATIO']), axis=1)
+    
+    met_data = {}
+    met_data['altitude'] = rs.apply(lambda row: row['HGHT'].to('m').magnitude, axis=1).values
+    met_data['wind_u'] = rs.apply(lambda row: row['U'].to('m/s').magnitude, axis=1).values
+    met_data['wind_v'] = rs.apply(lambda row: row['V'].to('m/s').magnitude, axis=1).values
+    met_data['temperature'] = rs.apply(lambda row: row['TEMP'].to('K').magnitude, axis=1).values
+    met_data['pressure'] = rs.apply(lambda row: row['PRES'].to('Pa').magnitude, axis=1).values
+    met_data['density'] = rs.apply(lambda row: row['RHO'].to('kg/m**3').magnitude, axis=1).values
+
+    met = MetData()
+    met.z_data = met_data['altitude'].astype('float64')
+    met.wind_U_data = met_data["wind_u"].astype('float64')
+    met.wind_V_data = met_data["wind_v"].astype('float64')
+    met.temperature_data = met_data["temperature"].astype('float64')
+    met.pressure_data = met_data["pressure"].astype('float64')
+    met.density_data = met_data["density"].astype('float64')
+    return met
+
+def read_wyoming_radiosonde(fname: str) -> MetData:
+    if not os.path.exists(fname):
+        raise FileExistsError(f"{fname} not found")
+    columns = [s for s in linecache.getline(fname,1).rstrip().split(',') if s not in ['time','latitude','longitude']]
+    rs = pd.read_csv(fname, usecols=columns, skipinitialspace=True)
+    rs.dropna(axis=0, inplace=True)
+    col_units = [s.split('_')[1] for s in columns]
+    columns = dict(zip(columns, col_units))
+    for col, unit in columns.items():
+        if unit=='C':
+            unit = 'degC'
+        rs[col] = rs.apply(lambda row: row[col]*units.units(unit), axis=1)    
+    rs[['U','V']] = rs.apply(lambda row: metcalc.wind_components(row['wind speed_m/s'], row['wind direction_degree']), axis=1, result_type='expand')
+    rs['RHO'] = rs.apply(lambda row: metcalc.density(row['pressure_hPa'], row['temperature_C'], row['mixing ratio_g/kg']), axis=1)
+
+    rs['Geopotential'] = rs.apply(lambda row: row['geopotential height_m'] * 9.80665*units.units('m/s/s'), axis=1)
+    rs['Altitude'] = rs.apply(lambda row: metcalc.geopotential_to_height(row['Geopotential']), axis=1)
+
+    met_data = {}
+    met_data['altitude'] = rs.apply(lambda row: row['Altitude'].to('m').magnitude, axis=1).values
+    met_data['wind_u'] = rs.apply(lambda row: row['U'].to('m/s').magnitude, axis=1).values
+    met_data['wind_v'] = rs.apply(lambda row: row['V'].to('m/s').magnitude, axis=1).values
+    met_data['temperature'] = rs.apply(lambda row: row['temperature_C'].to('K').magnitude, axis=1).values
+    met_data['pressure'] = rs.apply(lambda row: row['pressure_hPa'].to('Pa').magnitude, axis=1).values
+    met_data['density'] = rs.apply(lambda row: row['RHO'].to('kg/m**3').magnitude, axis=1).values
+
+    met = MetData()
+    met.z_data = met_data['altitude'].astype('float64')
+    met.wind_U_data = met_data["wind_u"].astype('float64')
+    met.wind_V_data = met_data["wind_v"].astype('float64')
+    met.temperature_data = met_data["temperature"].astype('float64')
+    met.pressure_data = met_data["pressure"].astype('float64')
+    met.density_data = met_data["density"].astype('float64')
+    return met
 
 def netCDF_to_Met(met: MetData, netcdf_data: NetcdfMet) -> MetData:
     N = len(netcdf_data.altitude)
@@ -527,17 +593,14 @@ def netCDF_to_Met(met: MetData, netcdf_data: NetcdfMet) -> MetData:
     return met
 
 
-def gfs_to_Met(met: MetData, gfs_data: pd.DataFrame) -> MetData:
-    gp = gfs_data["Geopotential_height_isobaric"]
-    temp = gfs_data["Temperature_isobaric"]
-    rh = gfs_data["Relative_humidity_isobaric"]
-    u = gfs_data["ucomponent_of_wind_isobaric"]
-    v = gfs_data["vcomponent_of_wind_isobaric"]
-    pres = gfs_data["alt"]
-    
-    N = len(pres)
+def gfs_to_Met(met: MetData, gfs_data: xr.Dataset) -> MetData:
 
-    # z = metcalc.
+    gfs_data['Geopotential'] = (gfs_data['Geopotential_height_isobaric']*units.units(gfs_data['Geopotential_height_isobaric'].units) 
+                                * 9.80665*units.units('m/s/s') )
+
+    gfs_data['Altitude'] = metcalc.geopotential_to_height(gfs_data['Geopotential'])
+
+    N = gfs_data['isobaric'].size
 
     met.z_data = np.empty((N), dtype=np.float64)
     met.z_data[:N] = np.flipud(z[:])

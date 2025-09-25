@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ashdisperse"
-version = "0.7.3"
+version = "0.7.4"
 authors = [
     { name = "Mark J. Woodhouse", email = "mark.woodhouse@bristol.ac.uk" },
 ]
@@ -18,7 +18,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "importlib_resources",
+    "importlib",
     "numpy",
     "numba",
     "ttb",

@@ -1,6 +1,5 @@
 import subprocess
-
-import importlib_resources
+from importlib import resources
 
 
 def run_notebook(file):
@@ -8,8 +7,8 @@ def run_notebook(file):
 
 
 def launch_jupyter_example():
-    ref = importlib_resources.files('ashdisperse.notebooks') / 'ashdisperse.ipynb'
-    with importlib_resources.as_file(ref) as path:
+    ref = resources.files('ashdisperse.notebooks') / 'ashdisperse.ipynb'
+    with resources.as_file(ref) as path:
         print(f"Running {path}")
         run_notebook(path)
         

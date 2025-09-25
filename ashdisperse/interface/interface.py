@@ -2,11 +2,14 @@
 import datetime
 import os
 import tkinter as tk
+from math import ceil, floor
 from tkinter.filedialog import askopenfilename
 
 import numpy as np
+import xarray as xr
 from scipy.integrate import solve_ivp
 from siphon.catalog import TDSCatalog
+from xarray.backends import NetCDF4DataStore
 
 from ..config import config
 from ..met import NetcdfMet, load_met, met, save_met
@@ -891,17 +894,21 @@ def _get_gfs_met(latitude, longitude, met_datetime):
     gfs_ds = gfs.datasets[0]
     ncss = gfs_ds.subset()
     query = ncss.query()
-    query.lonlat_point(longitude, latitude)
+    # query.lonlat_point(longitude, latitude)
+    # Make box containing latitude, longitude
+    query.lonlat_box(north=0.25*ceil(latitude/0.25), south=0.25*floor(latitude/0.25), east=0.25*ceil(longitude/0.25), west=0.25*floor(longitude/0.25))
     query.time(met_datetime)
-    # query.accept("netcdf4")
-    query.variables(
-        "Temperature_isobaric",
-        "Geopotential_height_isobaric",
-        "Relative_humidity_isobaric",
-        "u-component_of_wind_isobaric",
-        "v-component_of_wind_isobaric",
-    )
+
+    variables = ["Temperature_isobaric",
+                 "Geopotential_height_isobaric",
+                 "Relative_humidity_isobaric",
+                 "u-component_of_wind_isobaric",
+                 "v-component_of_wind_isobaric"]
+    
+    query.variables(*variables)
+    query.accept('netcdf4')
     gfs_data = ncss.get_data(query)
+    gfs_data = xr.open_dataset(NetCDF4DataStore(gfs_data))
     met_set = met.MetData()
     met_set = met.gfs_to_Met(met_set, gfs_data)
     return met_set
