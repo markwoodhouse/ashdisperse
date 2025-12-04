@@ -20,9 +20,9 @@ from .getters import (Source_z_dimless, lower_dWsdz, lower_U, lower_V,
 
 
 # LowerODE
-# @cc.export('LowerODE', Tuple((complex128[::1], complex128[::1], complex128[::1]))(float64, float64, complex128, int64, ChebContainer_type, Parameters_type, VelocityContainer_type))
+# @cc.export('LowerODE', Tuple((complex128[::1], complex128[::1]))(float64, float64, complex128, int64, ChebContainer_type, Parameters_type, VelocityContainer_type))
 @jit(
-    Tuple((complex128[::1], complex128[::1], complex128[::1]))(
+    Tuple((complex128[::1], complex128[::1]))(
         float64,
         float64,
         complex128,
@@ -39,7 +39,7 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
     Ly = parameters.model.Ly[grain_i]
-    Pe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
+    rPe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
     Vratio = parameters.model.Velocity_ratio[grain_i]
     R = parameters.model.Diffusion_ratio
 
@@ -50,7 +50,7 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
         Ws = lower_Ws(velocities, k)[:, grain_i] # dimensionless
         dWsdz = lower_dWsdz(velocities, k)[:, grain_i] # dimensionless
 
-        c2 = 4.0 * Pe * Vratio / R * np.ones_like(x, dtype=np.complex128)
+        c2 = 4.0 * rPe * Vratio / R * np.ones_like(x, dtype=np.complex128)
         c2a = np.reshape(np.repeat(c2, N), (N, N))
         L2 = np.multiply(c2a, d2Tn)
 
@@ -61,14 +61,14 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
         c0 = (
             -1j * pi * (kx / Lx * U + ky / Ly * V)
             + dWsdz
-            - pi * pi * Pe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
+            - pi * pi * rPe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
         )
         c0a = np.reshape(np.repeat(c0, N), (N, N))
         L0 = np.multiply(c0a, Tn)
 
         L = L2 + L1 + L0
 
-        b = np.zeros((N, 3), dtype=np.complex128)
+        b = np.zeros((N, 2), dtype=np.complex128)
         fz = Source_z_dimless(0.5 * (x + 1), 
                               parameters.emission.profile[grain_i],
                               parameters.emission.Suzuki_k[grain_i],
@@ -76,29 +76,25 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
                               parameters.emission.upper[grain_i],
                               parameters.source.PlumeHeight)
 
-        L[0, :] = Tn[0, :]
+        L[0, :] = dTn[0, :]
         L[-1, :] = Tn[-1, :]
 
         b[:, 0] = -fxy_ij * fz
         b[0, 0] = 0.0
         b[-1, 0] = 0.0
 
-        b[0, 1] = 1.0
-        b[-1, 1] = 0.0
-
-        b[0, 2] = 0.0
-        b[-1, 2] = 1.0
+        b[0, 1] = 0.0
+        b[-1, 1] = 1.0
 
         coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
 
         co0 = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
         co1 = truncateCoeffs(coeffs[:, 1].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
-        co2 = truncateCoeffs(coeffs[:, 2].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
 
-        if (co0.size < N) and (co1.size < N) and (co2.size < N):
+        if (co0.size < N) and (co1.size < N):
             break
 
-    return co0, co1, co2
+    return co0, co1
 
 
 # LowerODE

@@ -1,10 +1,12 @@
+import os
+from typing import Optional
+
 import metpy.calc as metcalc
 import numpy as np
-import os
 import pandas as pd
 import requests
-from typing import Optional
 import xarray as xr
+
 
 class GFS:
     def __init__(self, cycle_datetime: str, forecast_hr: str, lat: float, lon: float):
@@ -38,150 +40,15 @@ class GFS:
     def idx_url(self) -> str:
         return f"{self.url}.idx"
 
-    def _check_grib(self) -> bool:
-        if self.url:
-            head = requests.head(self.url)
-            check_exists = head.ok
-            if check_exists:
-                check_content = int(head.raw.info()["Content-Length"]) > 1_000_000
-                return check_exists and check_content
-        return False
+    def download(self, outFile: str="./gfs_data.nc") -> None:
 
-    def _check_idx(self) -> bool:
-        if self.idx_url:
-            idx_exists = requests.head(self.idx_url).ok
-            return idx_exists
-        return False
-
-    def _get_idx_as_dataframe(self) -> pd.DataFrame:
-        df = pd.read_csv(
-            self.idx_url,
-            sep=":",
-            names=[
-                "grib_message",
-                "start_byte",
-                "reference_time",
-                "variable",
-                "level",
-                "forecast_time",
-                "?",
-                "??",
-                "???",
-            ],
-        )
-
-        # Format the DataFrame
-        df["reference_time"] = pd.to_datetime(df.reference_time, format="d=%Y%m%d%H")
-        df["valid_time"] = df["reference_time"] + pd.to_timedelta(
-            f"{self.forecast_hr}h"
-        )
-        df["start_byte"] = df["start_byte"].astype(int)
-        df["end_byte"] = df["start_byte"].shift(-1, fill_value="")
-        # TODO: Check this works: Assign the ending byte for the last row...
-        # TODO: df["end_byte"] = df["start_byte"].shift(-1, fill_value=requests.get(self.grib, stream=True).headers['Content-Length'])
-        # TODO: Based on what Karl Schnieder did.
-        df["range"] = df.start_byte.astype(str) + "-" + df.end_byte.astype(str)
-        df = df.reindex(
-            columns=[
-                "grib_message",
-                "start_byte",
-                "end_byte",
-                "range",
-                "reference_time",
-                "valid_time",
-                "variable",
-                "level",
-                "forecast_time",
-                "?",
-                "??",
-                "???",
-            ]
-        )
-
-        df = df.dropna(how="all", axis=1)
-        df = df.fillna("")
-
-        df["search_this"] = (
-            df.loc[:, "variable":]
-            .astype(str)
-            .apply(
-                lambda x: ":" + ":".join(x).rstrip(":").replace(":nan:", ":"),
-                axis=1,
-            )
-        )
-
-        return df
-
-    def read_idx(self, searchString: Optional[str]=None) -> pd.DataFrame | None:
-        """
-        Inspect the GRIB2 file contents by reading the index file.
-
-        This reads index files created with the wgrib2 utility.
-
-        Parameters
-        ----------
-        searchString : str
-            Filter dataframe by a searchString regular expression.
-            Searches for strings in the index file lines, specifically
-            the variable, level, and forecast_time columns.
-            Execute ``_searchString_help()`` for examples of a good
-            searchString.
-
-            .. include:: ../../user_guide/searchString.rst
-
-        Returns
-        -------
-        A Pandas DataFrame of the index file.
-        """
-
-        # Filter DataFrame by searchString
-        if searchString not in [None, ":"]:
-            logic = self.idx.search_this.str.contains(searchString)
-            if logic.sum() == 0:
-                print(
-                    f"No GRIB messages found. There might be something wrong with {searchString=}"
-                )
-            df = self.idx.loc[logic]
-            return df
-        else:
-            return None
-
-    def download_grib(self, searchString: str, outFile: str="./gfs_grib_file.grib2") -> None:
-
-        grib_source = self.url
-
-        # Download subsets of the file by byte range with cURL.
-        # > Instead of using a single curl command for each row,
-        # > group adjacent messages in the same curl command.
-
-        # Find index groupings
-        # TODO: Improve this for readability
-        # https://stackoverflow.com/a/32199363/2383070
-        idx_df = self.read_idx(searchString)
-        li = idx_df.index
-        inds = (
-            [0]
-            + [ind for ind, (i, j) in enumerate(zip(li, li[1:]), 1) if j - i > 1]
-            + [len(li) + 1]
-        )
-
-        curl_groups = [li[i:j] for i, j in zip(inds, inds[1:])]
-        curl_ranges = []
-        group_dfs = []
-        for i, group in enumerate(curl_groups):
-            _df = idx_df.loc[group]
-            curl_ranges.append(f"{_df.iloc[0].start_byte}-{_df.iloc[-1].end_byte}")
-            group_dfs.append(_df)
-
-            for i, (range, _df) in enumerate(zip(curl_ranges, group_dfs)):
-
-                if i == 0:
-                    # If we are working on the first item, overwrite the existing file...
-                    curl = f"curl -s --range {range} {grib_source} > {outFile}"
-                else:
-                    # ...all other messages are appended to the subset file.
-                    curl = f"curl -s --range {range} {grib_source} >> {outFile}"
-                os.system(curl)
+        gfs = TDSCatalog(self.url)
+        gfs_ds = gfs.datasets[0]
+        ncss = gfs_ds.subset()
+        query = ncss.query()
+        # Make box containing latitude, longitude
+        query.lonlat_box(north=0.25*ceil(self.lat/0.25), south=0.25*floor(self.lat/0.25), east=0.25*ceil(self.lon/0.25), west=0.25*floor(self.lon/0.25))
+        query.time(self.forecast_hr)
 
     def profiles(self) -> pd.DataFrame:
 

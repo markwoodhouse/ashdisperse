@@ -12,7 +12,7 @@ from siphon.catalog import TDSCatalog
 from xarray.backends import NetCDF4DataStore
 
 from ..config import config
-from ..met import NetcdfMet, load_met, met, save_met
+from ..met import ERA5, NetcdfMet, load_met, met, save_met
 from ..params import (EmissionParameters, GrainParameters, MetParameters,
                       ModelParameters, OutputParameters, Parameters,
                       PhysicalParameters, SolverParameters, SourceParameters,
@@ -692,18 +692,31 @@ def set_met_parameters(params_set, met_set):
     return params_set
 
 
-def advected_settling_trajectories(params, met) -> list[dict[str, np.typing.NDArray]]:
+def advected_settling_trajectories(params, met) -> tuple(list[dict[str, np.typing.NDArray]]):
 
     trajectories = []
 
     for j in range(params.grains.bins):
-        def dxdz(z,x):
+        def dfdz(z,f):
+            """f is the vector [x(z),y(z),t(z)] and the equations are
+            
+                dx/dz = -U(z)/ws(z)
+                dy/dz = -V(z)/ws(z)
+                dt/dz = -1/ws(z)
+
+            with boundary conditions
+                x(H)=y(H)=t(H) = 0
+
+            We solve the equations for z in [H,0)
+            
+            """
+
             ws = met.settling_speed_for_grain_class_value(params, j, z)
-            dx = [-met.wind_U_value(z)/ws, -met.wind_V_value(z)/ws]
-            return dx
+            df = [-met.wind_U_value(z)/ws, -met.wind_V_value(z)/ws, -1.0/ws]
+            return df
         
-        sol = solve_ivp(dxdz, [params.source.PlumeHeight,0], [0,0], max_step=10)
-        trajectories.append({'x':sol.y[0,:], 'y':sol.y[1,:], 'z': sol.t})
+        sol = solve_ivp(dfdz, [params.source.PlumeHeight,0], [0,0,0], max_step=10)
+        trajectories.append({'x':sol.y[0,:], 'y':sol.y[1,:], 'z': sol.t, 'T': sol.y[2,-1]})
 
     return trajectories
 
@@ -714,8 +727,11 @@ def estimate_dispersal_distance(params, met) -> np.typing.NDArray:
     trajectories = advected_settling_trajectories(params, met)
 
     for j in range(params.grains.bins):
-        dispersal_distance[j,0] = np.max(np.abs(trajectories[j]['x']))
-        dispersal_distance[j,1] = np.max(np.abs(trajectories[j]['y']))
+
+        diffusion_distance = 10.0*np.sqrt(params.physical.Kappa_h*trajectories[j]['T'])
+
+        dispersal_distance[j,0] = np.maximum(np.max(np.abs(trajectories[j]['x'])), diffusion_distance)
+        dispersal_distance[j,1] = np.maximum(np.max(np.abs(trajectories[j]['y'])), diffusion_distance)
     return dispersal_distance
 
 
@@ -878,11 +894,12 @@ def _extract_local_netcdf_met(nc_data, latitude, longitude, met_datetime):
 def _get_ecmwf_met(
     latitude, longitude, met_datetime, met_filename="./MetData/era5_download.nc"
 ):
-    cdf_data = NetcdfMet(met_filename)
-    cdf_data.download_era5(lat=latitude, lon=longitude, datetime=met_datetime)
-    cdf_data.extract(lat=latitude, lon=longitude, datetime=met_datetime)
+    print(met_datetime)
+    cdf_data = ERA5(met_filename)
+    cdf_data.download(lat=latitude, lon=longitude, datetime=met_datetime)
+    profile = cdf_data.extract(lat=latitude, lon=longitude, time=met_datetime)
     met_set = met.MetData()
-    met_set = met.netCDF_to_Met(met_set, cdf_data)
+    met_set = met.MetProfile_to_Met(met_set, profile)
     return met_set
 
 

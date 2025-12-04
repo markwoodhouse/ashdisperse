@@ -29,6 +29,7 @@ from ..utilities.utilities import (SA_Density_array, SA_Density_value,
                                    SA_Pressure_array, SA_Pressure_value,
                                    SA_Temperature_array, SA_Temperature_value,
                                    interp_ex_array, interp_ex_value)
+from .met_netcdf import MetProfile
 
 MetData_spec = OrderedDict()
 MetData_spec["z_data"] = float64[::1]
@@ -589,6 +590,24 @@ def netCDF_to_Met(met: MetData, netcdf_data: NetcdfMet) -> MetData:
     met.pressure_data[:N] = netcdf_data.pressure[:N]
     met.density_data = np.empty((N), dtype=np.float64)
     met.density_data[:N] = netcdf_data.density[:N]
+    met.source = "netCDF"
+    return met
+
+
+def MetProfile_to_Met(met: MetData, profile: MetProfile) -> MetData:
+    N = len(profile.altitude)
+    met.z_data = np.empty((N), dtype=np.float64)
+    met.z_data[:N] = profile.altitude[:N]
+    met.wind_U_data = np.empty((N), dtype=np.float64)
+    met.wind_U_data[:N] = profile.wind_U[:N]
+    met.wind_V_data = np.empty((N), dtype=np.float64)
+    met.wind_V_data[:N] = profile.wind_V[:N]
+    met.temperature_data = np.empty((N), dtype=np.float64)
+    met.temperature_data[:N] = profile.temperature[:N]
+    met.pressure_data = np.empty((N), dtype=np.float64)
+    met.pressure_data[:N] = profile.pressure[:N]
+    met.density_data = np.empty((N), dtype=np.float64)
+    met.density_data[:N] = profile.density[:N]
     met.source = "netCDF"
     return met
 
