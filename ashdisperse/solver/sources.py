@@ -61,7 +61,7 @@ def source_xy_dimless_flat(x, y, p):
 
 
 def source_xy_dimless(x, y, p):
-    xx, yy = np.meshgrid(x, y)
+    xx, yy = np.meshgrid(x, y, indexing='ij')
     pi = np.pi
     pi2 = pi * pi
 
