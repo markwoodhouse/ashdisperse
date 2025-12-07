@@ -33,7 +33,7 @@ from .getters import (Source_z_dimless, lower_dWsdz, lower_U, lower_V,
     ),
     nopython=True,
     cache=True,
-    fastmath=True,
+    fastmath=False,
 )
 def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
     pi = np.pi
@@ -97,146 +97,6 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
     return co0, co1
 
 
-# LowerODE
-# @cc.export('LowerODE', Tuple((complex128[::1], complex128[::1], complex128[::1]))(float64, float64, complex128, int64, ChebContainer_type, Parameters_type, VelocityContainer_type))
-@jit(
-    complex128[::1](
-        float64,
-        float64,
-        complex128,
-        int64,
-        ChebContainer_type,
-        Parameters_type,
-        VelocityContainer_type,
-    ),
-    nopython=True,
-    cache=True,
-    fastmath=True,
-)
-def LowerODE_f(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
-    pi = np.pi
-    Lx = parameters.model.Lx[grain_i]
-    Ly = parameters.model.Ly[grain_i]
-    Pe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
-    Vratio = parameters.model.Velocity_ratio[grain_i]
-    R = parameters.model.Diffusion_ratio
-
-    for k, N in enumerate(cheby.N):
-        x, Tn, dTn, d2Tn = cheby.get_cheb(k)
-        U = lower_U(velocities, k)
-        V = lower_V(velocities, k)
-        Ws = lower_Ws(velocities, k)[:, grain_i]
-        dWsdz = lower_dWsdz(velocities, k)[:, grain_i]
-
-        c2 = 4.0 * Pe * Vratio / R * np.ones_like(x, dtype=np.complex128)
-        c2a = np.reshape(np.repeat(c2, N), (N, N))
-        L2 = np.multiply(c2a, d2Tn)
-
-        c1 = 2 * Ws
-        c1a = np.reshape(np.repeat(c1, N), (N, N))
-        L1 = np.multiply(c1a, dTn)
-
-        c0 = (
-            -1j * pi * (kx / Lx * U + ky / Ly * V)
-            + dWsdz
-            - pi * pi * Pe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
-        )
-        c0a = np.reshape(np.repeat(c0, N), (N, N))
-        L0 = np.multiply(c0a, Tn)
-
-        L = L2 + L1 + L0
-
-        b = np.zeros((N, 1), dtype=np.complex128)
-        fz = Source_z_dimless(0.5 * (x + 1), 
-                              parameters.emission.profile[grain_i],
-                              parameters.emission.Suzuki_k[grain_i],
-                              parameters.emission.lower[grain_i],
-                              parameters.emission.upper[grain_i],
-                              parameters.source.PlumeHeight)
-
-        L[0, :] = dTn[0, :]
-        L[-1, :] = Tn[-1, :]
-
-        b[:, 0] = -fxy_ij * fz
-        b[0, 0] = 0.0
-        b[-1, 0] = 0.0
-
-        coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
-
-        co0 = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
-
-        if co0.size < N:
-            break
-
-    return co0
-
-
-@jit(
-    complex128[::1](
-        float64,
-        float64,
-        int64,
-        ChebContainer_type,
-        Parameters_type,
-        VelocityContainer_type,
-        int64,
-        complex128,
-    ),
-    nopython=True,
-    cache=True,
-    fastmath=True,
-)
-def LowerODE_0(kx, ky, grain_i, cheby, parameters, velocities, b_indx, b_m):
-    pi = np.pi
-    Lx = parameters.model.Lx[grain_i]
-    Ly = parameters.model.Ly[grain_i]
-    Pe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
-    Vratio = parameters.model.Velocity_ratio[grain_i]
-    R = parameters.model.Diffusion_ratio
-
-    for k, N in enumerate(cheby.N):
-        x, Tn, dTn, d2Tn = cheby.get_cheb(k)
-        U = lower_U(velocities, k)
-        V = lower_V(velocities, k)
-        Ws = lower_Ws(velocities, k)[:, grain_i]
-        dWsdz = lower_dWsdz(velocities, k)[:, grain_i]
-
-        c2 = 4.0 * Pe * Vratio / R * np.ones_like(x, dtype=np.complex128)
-        c2a = np.reshape(np.repeat(c2, N), (N, N))
-        L2 = np.multiply(c2a, d2Tn)
-
-        c1 = 2 * Ws
-        c1a = np.reshape(np.repeat(c1, N), (N, N))
-        L1 = np.multiply(c1a, dTn)
-
-        c0 = (
-            -1j * pi * (kx / Lx * U + ky / Ly * V)
-            + dWsdz
-            - pi * pi * Pe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
-        )
-        c0a = np.reshape(np.repeat(c0, N), (N, N))
-        L0 = np.multiply(c0a, Tn)
-
-        L = L2 + L1 + L0
-
-        b = np.zeros((N, 1), dtype=np.complex128)
-
-        L[0, :] = dTn[0, :]
-        L[-1, :] = Tn[b_indx, :]
-
-        b[0, 0] = 0.0
-        b[-1, 0] = b_m
-
-        coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
-
-        co = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
-
-        if co.size < N:
-            break
-
-    return co
-
-
 # UpperODE
 # @cc.export('UpperODE', complex128[::1](float64, float64, int64, ChebContainer_type, Parameters_type, VelocityContainer_type))
 @jit(
@@ -250,13 +110,13 @@ def LowerODE_0(kx, ky, grain_i, cheby, parameters, velocities, b_indx, b_m):
     ),
     nopython=True,
     cache=True,
-    fastmath=True,
+    fastmath=False,
 )
 def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
     Ly = parameters.model.Ly[grain_i]
-    Pe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
+    rPe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
     Vratio = parameters.model.Velocity_ratio[grain_i]
     R = parameters.model.Diffusion_ratio
 
@@ -268,12 +128,12 @@ def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
         dWsdz = upper_dWsdz(velocities, k)[:, grain_i]
 
         c2 = np.zeros_like(x, dtype=np.complex128)
-        c2[:-1] = ((1 - x[:-1]) ** 4) / 4 * Pe * Vratio / R
+        c2[:-1] = ((1 - x[:-1]) ** 4) / 4 * rPe * Vratio / R
         c2a = np.reshape(np.repeat(c2, N), (N, N))
         L2 = np.multiply(c2a, d2Tn)
 
         c1 = np.zeros_like(x, dtype=np.complex128)
-        c1[:-1] = ((1 - x[:-1]) ** 2) / 2 * (Ws - (1 - x[:-1]) * Pe * Vratio / R)
+        c1[:-1] = ((1 - x[:-1]) ** 2) / 2 * (Ws - (1 - x[:-1]) * rPe * Vratio / R)
         c1[-1] = 0
         c1a = np.reshape(np.repeat(c1, N), (N, N))
         L1 = np.multiply(c1a, dTn)
@@ -282,7 +142,7 @@ def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
         c0[:-1] = (
             -1j * pi * (kx / Lx * U + ky / Ly * V)
             + dWsdz
-            - pi * pi * Pe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
+            - pi * pi * rPe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
         )
         c0[-1] = 0
         c0a = np.reshape(np.repeat(c0, N), (N, N))

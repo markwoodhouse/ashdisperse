@@ -47,7 +47,7 @@ from ashdisperse.params import Parameters_type
     ),
     cache=True,
     parallel=False,
-    fastmath=True,
+    fastmath=False,
 )
 def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, VelocityContainer):
 

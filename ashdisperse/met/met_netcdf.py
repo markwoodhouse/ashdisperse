@@ -355,7 +355,8 @@ class MetProfileExtractor:
         # --- Compute derived quantities ---
         spd = metcalc.wind_speed(U, V)
         dirn = metcalc.wind_direction(U, V, convention=convention)
-        mixr = metcalc.mixing_ratio_from_relative_humidity(P, T, RH)
+        mixr = metcalc.mixing_ratio_from_relative_humidity(P, T, RH, phase='auto')
+        mixr[np.isnan(mixr)] = 0.0  # handle NaNs in mixing ratio
         rho = metcalc.density(P, T, mixr)
 
         # --- Return profile object ---
