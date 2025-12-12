@@ -175,7 +175,7 @@ def cheb_tail_test(a_abs, tol_tail=1e-8, M=8):
     """
     Numba-friendly tail test.
     Input:
-      a_abs : float64[:]  -- ABSOLUTE values of Chebyshev coeffs (non-negative)
+      a_abs : float64[:]   -- absolute values of Chebyshev coeffs (non-negative)
       tol_tail : float64   -- normalized tail tolerance
       M : int              -- number of last coefficients to use in simple tail check
     Returns:

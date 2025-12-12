@@ -1,6 +1,8 @@
+from __future__ import annotations
 import os
 import warnings
 from math import ceil, floor
+from typing import Self, Optional, TypeAlias
 
 import branca.colormap as cm
 import folium
@@ -8,7 +10,7 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import pyproj as Proj
+from pyproj import Transformer
 import rasterio as rio
 import rioxarray as rxa
 import utm
@@ -24,6 +26,7 @@ from scipy.interpolate import RectBivariateSpline, interp1d
 from shapely.geometry import Polygon
 from skimage.measure import find_contours, marching_cubes
 
+from ashdisperse.params import Parameters
 from ashdisperse.params.emission_params import EmissionParameters
 from ashdisperse.params.grain_params import GrainParameters
 from ashdisperse.params.met_params import MetParameters
@@ -43,11 +46,42 @@ from ..mapping import (BindColormap, add_north_arrow, add_opentopo_basemap,
 from ..utilities import (lin_levels, log_levels, log_steps, nice_round_down,
                          nice_round_up, pad_window, plot_rowscols)
 
+Point: TypeAlias = tuple[float, float]
+PointList: TypeAlias = list[Point]
 
-def compat_warning(message, category, filename, lineno, file=None, line=None):
+def compat_warning(message: str, category: str, filename:str, lineno, file=None, line=None) -> str:
     return f"{category.__name__}: {message}"
 
-def _clip_to_window(raster, x, y, vmin=1e-5, pad=1):
+def _clip_to_window(
+        raster: np.ndarray, 
+        x: np.ndarray, 
+        y: np.ndarray, 
+        vmin: float, 
+        pad: int=1
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Clip a raster to values >= vmin
+
+    Parameters
+    ----------
+    raster : np.ndarray
+        2D array to clip
+    x : np.ndarray
+        1D array of x-coordinates
+    y : np.ndarray
+        1D array of y-coordinates
+    vmin : float
+        threshold for clipping
+    pad : int, optional
+        Include extra cells around clipped values, by default 1
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        raster_clip, x_clip, y_clip
+        The clipped raster, and clipped x and y coordinates
+    """
+    
     height, width = raster.shape
     raster_tmp = np.copy(raster)
     raster_tmp[raster < vmin] = -1.0
@@ -61,10 +95,47 @@ def _clip_to_window(raster, x, y, vmin=1e-5, pad=1):
     raster_out = raster[row_start:row_stop, col_start:col_stop]
     x_out = x[col_start:col_stop]
     y_out = y[row_start:row_stop]
+    
     return raster_out, x_out, y_out
 
 
-def _interpolate(raster, x, y, resolution, extent=None, nodata=-1, vmin=1e-6):
+def _interpolate(
+        raster: np.ndarray, 
+        x: np.ndarray, 
+        y: np.ndarray, 
+        resolution: float, 
+        extent: Optional[list[float]]=None, 
+        vmin: float=1e-6,
+        nodata: float=-1, 
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Interpolate a raster to different grid resolution
+
+    Parameters
+    ----------
+    raster : np.ndarray
+        2D array to interpolate
+    x : np.ndarray
+        1D array of x coordinates
+    y : np.ndarray
+        1D array of y coordinates
+    resolution : float
+        grid cell size to interpolate on to
+    extent : Optional[list[float]], optional
+        bounding box to limit the extent, ordered as [min_x, min_y, max_x, max_y], by default None
+    vmin : float, optional
+        lower thresholding value.  Values in input raster < vmin are ignored, by default 1e-6
+    nodata : float, optional
+        no data value.  Values in input raster < vmin are set to nodata , by default -1
+    
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        (x_out, y_out, raster_out)
+        The interpolated raster (raster_out) and new coordinates (x_out, y_out) as arrays.
+    """
+
 
     if extent is not None:
         min_x = extent[0]
@@ -80,8 +151,6 @@ def _interpolate(raster, x, y, resolution, extent=None, nodata=-1, vmin=1e-6):
         max_x = x[window.col_off + window.width - 1]
         max_y = y[window.row_off + window.height - 1]
 
-    print("resolution = ", resolution)
-
     left = floor(min_x / resolution) * resolution
     right = ceil(max_x / resolution) * resolution
     bottom = floor(min_y / resolution) * resolution
@@ -89,7 +158,6 @@ def _interpolate(raster, x, y, resolution, extent=None, nodata=-1, vmin=1e-6):
 
     width = int((right - left) / resolution) + 1
     height = int((top - bottom) / resolution) + 1
-    print("Output raster shape is ({h},{w})".format(h=height, w=width))
 
     x_out = np.linspace(left, right, num=width, endpoint=True)
     y_out = np.linspace(bottom, top, num=height, endpoint=True)
@@ -101,20 +169,183 @@ def _interpolate(raster, x, y, resolution, extent=None, nodata=-1, vmin=1e-6):
 
     raster_out = intrp(y_out, x_out)
 
-    return raster_out, x_out, y_out
+    return x_out, y_out, raster_out
 
+
+
+def _sample_point_from_dataset(
+    ds: xa.Dataset,
+    target_crs: rio.crs.CRS,
+    latlon: Optional[Point | PointList] = None,
+    xy: Optional[Point | PointList] = None,
+    var: str = "ash_load",
+    fallback: float = 0.0,
+    method: str = "linear",
+) -> float | np.ndarray:
+    """
+    Sample one or more points from an xarray Dataset using projected or geographic coordinates.
+
+    This utility interpolates values from a gridded dataset at specified locations.
+    It supports input as projected coordinates (`xy`) or geographic coordinates (`latlon`),
+    automatically transforming WGS84 coordinates to the target CRS when necessary.
+
+    Behavior
+    --------
+    - If `xy` is provided, it is used directly.
+    - If `xy` is not provided, `latlon` (in WGS84) is transformed to `target_crs`.
+    - If neither `xy` nor `latlon` is provided, returns `fallback`.
+    - Returns `fallback` for missing variables, interpolation errors, or no valid data.
+    - Handles both scalar and vector inputs; returns a float for a single point or a NumPy array for multiple points.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing the variable to sample and `x`, `y` coordinates (projected CRS preferred).
+    target_crs : rasterio.crs.CRS
+        Coordinate reference system to project into when `latlon` is provided.
+    latlon : Point or list of Point, optional
+        Geographic coordinates (latitude, longitude) in WGS84. Used if `xy` is not provided.
+    xy : Point or list of Point, optional
+        Projected coordinates in the same CRS as `ds`. Preferred over `latlon` if both are given.
+    var : str, optional
+        Name of the variable in `ds` to sample. Default is `"ash_load"`.
+    fallback : float, optional
+        Value returned when sampling fails, variable is missing, or no valid data exists. Default is `0.0`.
+    method : str, optional
+        Interpolation method passed to `xarray.DataArray.interp`. Common options: `"linear"`, `"nearest"`.
+        Default is `"linear"`.
+
+    Returns
+    -------
+    float or ndarray
+        Interpolated value(s) for the requested variable:
+        - A single float if one point is sampled.
+        - A NumPy array if multiple points are sampled.
+        Returns `fallback` or an array filled with `fallback` if sampling fails.
+
+    Raises
+    ------
+    UserWarning
+        - If `var` is not found in the dataset.
+        - If neither `xy` nor `latlon` is provided.
+        - If an error occurs during interpolation or CRS transformation.
+
+    Notes
+    -----
+    - Negative or NaN values are replaced with `fallback`.
+    - CRS transformation uses `pyproj.Transformer` with `always_xy=True` (longitude, latitude order).
+    - For multiple points, input can be a list of tuples or a NumPy array with shape `(n, 2)`.
+
+    Examples
+    --------
+    >>> # Sample using projected coordinates
+    >>> val = _sample_point_from_dataset(ds, target_crs, xy=(500000, 5200000), var="ash_load")
+    >>> print(val)
+    0.0021
+
+    >>> # Sample multiple points using    >>> # Sample multiple points using lat/lon
+    >>> points = [(45.1, -122.3), (45.2, -122.4)]
+    >>> vals = _sample_point_from_dataset(ds, target_crs, latlon=points, var="ash_load")
+    >>> vals
+    array([0.0018, 0.0020])
+    """
+    if ds is None:
+        return fallback
+    
+    if xy is not None:
+        coords = xy
+    elif latlon is not None:
+        transformer = Transformer.from_crs("EPSG:4326", target_crs, always_xy=True)
+
+        if isinstance(latlon, list):
+            latlon = np.asarray(latlon)
+            lat = latlon[:,0] # type: ignore
+            lon = latlon[:,1] # type: ignore
+        else:
+            lat = latlon[0]
+            lon = latlon[1]
+        x, y = transformer.transform(lon, lat)
+        coords = (x, y)
+    else:
+        warnings.warn("Need either xy or latlon to sample")
+        return fallback
+    
+    if isinstance(coords, list) or (isinstance(coords, np.ndarray) and coords.ndim == 2):
+        x = np.asarray(coords)[:, 0]
+        y = np.asarray(coords)[:, 1]
+    else:
+        x = coords[0]
+        y = coords[1]
+
+    x = np.atleast_1d(x)
+    y = np.atleast_1d(y)
+
+    try:
+        
+        target_x = xa.DataArray(np.atleast_1d(x), dims="locations")
+        target_y = xa.DataArray(np.atleast_1d(y), dims="locations")
+
+        sampled = ds[var].interp(x=target_x, y=target_y, method=method)
+        vals = np.array(sampled.values)
+
+        if vals.size == 0:
+            return fallback
+
+        vals[vals<=0] = fallback
+        vals[np.isnan(vals)] = fallback
+
+        return vals
+    except Exception as exc:
+        warnings.warn(f"Error sampling point from dataset: {exc}")
+        return fallback*np.ones_like(x)
+        
 
 class AshDisperseResult:
     """Results of an AshDisperse simulation"""
-    def __init__(self, params, C0_FT, Cz_FT):
-        """Create AshDisperse result class"""
-        self.grain_classes = params.grains.bins
+    params: Parameters
+    utm: tuple[float,float,int,str]
+    utmepsg: int
+    C0_FT: np.ndarray
+    Cz_FT: np.ndarray
+    x_dimless: np.ndarray
+    y_dimless: np.ndarray
+    kx: np.ndarray
+    ky: np.ndarray
+    C0_dimless: np.ndarray
+    Cz_dimless: np.ndarray
+    C0: np.ndarray
+    Cz: np.ndarray
+    SettlingFlux: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    
+    _interpolated: bool
+
+    def __init__(
+            self, params: Parameters, C0_FT: np.ndarray, Cz_FT: np.ndarray
+        ):
+        """
+        Create a AshDisperseResult instance from parameters and arrays of Fourier coefficients
+
+        Parameters
+        ----------
+        params : Parameters
+            Parameter settings for this result
+        C0_FT : np.ndarray
+            Array of Fourier coefficients for ground-level concentration ordered as [y,x,grain]
+        Cz_FT : np.ndarray
+            Array of Fourier coefficients for z-level concentration ordered as [y,x,z,grain]
+
+        Notes
+        -----
+        params contains essential data for reconstructing the solution from the Fourier coefficient arrays.
+        It is expected that params is created using ashdisperse.set_parameters()
+        or loaded from a file saved after this construction
+        """
+        
         self.params = copy_parameters(params)
 
         self._interpolated = False
-        self._changed_MER = False
-        self._changed_gsd = False
-        self._changed_duration = False
 
         self.utm = utm.from_latlon(
             self.params.source.latitude, self.params.source.longitude
@@ -147,10 +378,6 @@ class AshDisperseResult:
         C0 = np.zeros((Ny, Nx, Ng), dtype=np.float64)
         Cz = np.zeros((Ny, Nx, Nz, Ng), dtype=np.float64)
         
-        # for igrain in range(Ng):
-        #     C0[:, :, igrain] = np.real(ifft2(C0_FT[:, :, igrain], s=(Ny,Nx))) / (res_x * res_y)
-        #     for k in range(Nz):
-        #         Cz[:, :, k, igrain] = np.real(ifft2(Cz_FT[:, :, k, igrain], s=(Ny,Nx))) / (res_x * res_y)
         for igrain in range(Ng):
             C0[:, :, igrain] = irfft2(C0_FT[:, :, igrain], s=(Ny,Nx)) / (res_x * res_y)
             for k in range(Nz):
@@ -163,12 +390,10 @@ class AshDisperseResult:
         self.Cz = np.zeros_like(Cz)
         self.SettlingFlux = np.zeros_like(C0)
 
-        self.x = np.zeros((len(x), params.grains.bins))
-        self.y = np.zeros((len(y), params.grains.bins))
+        self.x = np.zeros((len(x), Ng))
+        self.y = np.zeros((len(y), Ng))
 
-        for j in range(params.grains.bins):
-            # self.x[:, j] = x * params.model.xyScale[j] * params.model.Lx[j] / np.pi
-            # self.y[:, j] = y * params.model.xyScale[j] * params.model.Ly[j] / np.pi
+        for j in range(Ng):
             self.x[:, j] = x * params.model.xScale[j] * params.model.Lx[j] / np.pi
             self.y[:, j] = y * params.model.yScale[j] * params.model.Ly[j] / np.pi
             self.C0[:, :, j] = C0[:, :, j] * params.model.cScale[j]
@@ -177,20 +402,78 @@ class AshDisperseResult:
                 params.met.Ws_scale[j] * C0[:, :, j] * params.model.cScale[j]
             )
 
+
+    @property
+    def grain_classes(self) -> int:
+        """
+        Number of grain classes
+
+        Returns
+        -------
+        int
+            Number of grain classes
+        """
+        return self.params.grains.bins
+    
+    @property
+    def interpolated(self) -> bool:
+        """
+        Check if this AshDisperseResult is produced by interpolation
+
+        Returns
+        -------
+        bool
+            True if this AshDisperseResult is produced by zero-padding interpolation from a computed AshDisperseResult,
+            False otherwise
+        """
+        return self._interpolated
+
+    @property
+    def source_marker(self) -> gpd.GeoDataFrame:
+        """
+        GeoDataFrame containing the source location
+
+        Returns
+        -------
+        gpd.GeoDataFrame
+            GeoDataFrame containing the source location in WGS84 coordinates
+        """
+
         df = pd.DataFrame(columns=["Name", "Latitude", "Longitude"])
         df.loc[0] = [
             self.params.source.name,
             self.params.source.latitude,
             self.params.source.longitude,
         ]
-        self.source_marker = gpd.GeoDataFrame(
+        source_marker = gpd.GeoDataFrame(
             df,
             geometry=gpd.points_from_xy(df.Longitude, df.Latitude),
             crs=wgs84["init"],
         )
+        return source_marker
 
-    def linear_interp(self, Nx_log2: int, Ny_log2: int):
-        "Do a bilinear interpolation by zero-padding the FFTs"
+
+    def linear_interp(self, Nx_log2: int, Ny_log2: int) -> AshDisperseResult:
+        """
+        Return a new AshDisperseResult with bilinear interpolation by zero-padding the FFTs.
+
+        Parameters
+        ----------
+        Nx_log2 : int
+            log2 of the number of Fourier modes in x
+        Ny_log2 : int
+            log2 of the number of Fourier modes in y
+
+        Returns
+        -------
+        AshDisperseResult
+            A new AshDisperseResult.  The original object is unchanged.
+
+        Notes
+        -----
+        The internal stored parameters are updated for the new sizes.
+        A class private variable _interpolated is set to True to indicate this AshDisperseResult is generated by zero-padding interpolation.
+        """
         
         Nx_old = self.params.solver.Nx
         Ny_old = self.params.solver.Ny
@@ -200,19 +483,26 @@ class AshDisperseResult:
         Nx = 2**Nx_log2
         Ny = 2**Ny_log2
 
-        half_Nx_old = Nx_old//2 + 1
-        half_Nx = Nx//2 + 1
+        half_Nx_old = Nx_old // 2 + 1
+        half_Nx = Nx // 2 + 1
 
-        half_Ny_old = Ny_old//2
+        # For the ky dimension we must preserve the Nyquist/mid row when present.
+        # Copy the low-frequency block (including mid if Ny_old is even) and the
+        # high-frequency tail into the end of the new array so the spectral
+        # layout is preserved when transforming back to physical space.
+        half_Ny_old = Ny_old // 2 + 1
 
         C0_FT = np.zeros((Ny, half_Nx, Ng), dtype=np.complex128)
         Cz_FT = np.zeros((Ny, half_Nx, Nz, Ng), dtype=np.complex128)
 
-        C0_FT[:half_Ny_old,:half_Nx_old,:] = self.C0_FT[:half_Ny_old,:,:]
-        C0_FT[Ny-half_Ny_old+1:,:half_Nx_old, :] = self.C0_FT[half_Ny_old+1:,:, :]
+        # copy low-frequency block (rows 0 .. half_Ny_old-1)
+        C0_FT[:half_Ny_old, :half_Nx_old, :] = self.C0_FT[:half_Ny_old, :, :]
+        # copy high-frequency tail to the end of the new array
+        start_row = Ny - (Ny_old - half_Ny_old)
+        C0_FT[start_row:, :half_Nx_old, :] = self.C0_FT[half_Ny_old:, :, :]
 
-        Cz_FT[:half_Ny_old,:half_Nx_old,:, :] = self.Cz_FT[:half_Ny_old,:,:, :]
-        Cz_FT[Ny-half_Ny_old+1:,:half_Nx_old, :, :] = self.Cz_FT[half_Ny_old+1:,:, :, :]
+        Cz_FT[:half_Ny_old, :half_Nx_old, :, :] = self.Cz_FT[:half_Ny_old, :, :, :]
+        Cz_FT[start_row:, :half_Nx_old, :, :] = self.Cz_FT[half_Ny_old:, :, :, :]
 
         params = copy_parameters(self.params)
         params.solver.Nx_log2 = Nx_log2
@@ -224,42 +514,214 @@ class AshDisperseResult:
         return r
 
 
-    def change_MER(self,MER):
-        params = self.params
+    def change_MER(self, MER: float) -> AshDisperseResult:
+        """
+        Create a new AshDisperseResult with updated mass eruption rate (MER).
+
+        This method does not modify the original object; instead, it returns a new
+        instance with the specified MER applied.
+
+        Parameters
+        ----------
+        MER : float
+            A float representing the new MER.  The MER must be positive.
+
+        Returns
+        -------
+        AshDisperseResult
+            A new AshDisperseResult instance with updated MER.
+
+        Raises
+        ------
+        ValueError
+            If MER is not positive.
+
+        Examples
+        --------
+        Change original_result with new MER of 1e7
+            >>> result = original_result.change_duration(1e6)
+            >>> result.params.source.MER
+            1000000.0
+        """
+
+        if MER<=0:
+            raise ValueError(f"MER must be positive, received {MER}")
+        
+        params = copy_parameters(self.params)
         params.source.MER = MER
-        self.params.model.from_params(
+        params.model.from_params(
             params,
             params.model.xScale,
             params.model.yScale
         )
+        return AshDisperseResult(params, self.C0_FT, self.Cz_FT)
 
-        self.__init__(params, self.C0_FT, self.Cz_FT)
-        self._changed_MER = True
+    def change_duration(self, duration: float) -> AshDisperseResult:
+        """
+        Create a new AshDisperseResult with updated duration.
 
-    def change_duration(self,duration):
-        self.params.source.duration = duration
-        self._changed_duration = True
+        This method does not modify the original object; instead, it returns a new
+        instance with the specified duration applied.
 
-    def change_grain_proportions(self,props):
-        if len(props)!=self.params.grains.bins:
+        Parameters
+        ----------
+        duration : float
+            A float representing the new duration.  The duration must be positive.
+
+        Returns
+        -------
+        AshDisperseResult
+            A new AshDisperseResult instance with updated duration.
+
+        Raises
+        ------
+        ValueError
+            If duration is not positive.
+
+        Examples
+        --------
+        Change original_result with new duration of one hour
+            >>> result = original_result.change_duration(3600)
+            >>> result.params.source.duration
+            3600.0
+        """
+        if duration<=0:
+            raise ValueError(f"duration must be positive, received {duration}")
+
+        params = copy_parameters(self.params)
+        params.source.duration = duration
+        return AshDisperseResult(params, self.C0_FT, self.Cz_FT)
+
+    def change_grain_proportions(self, props: list[float]) -> AshDisperseResult:
+        """
+        Create a new AshDisperseResult with updated grain size proportions.
+
+        This method does not modify the original object; instead, it returns a new
+        instance with the specified grain size proportions applied.
+
+        Parameters
+        ----------
+        props : list of float
+            A list of floats representing the new proportions for each grain size class.
+            The length of this list must equal the number of grain size classes defined
+            in `self.params.grains.bins`. Each value must be in the range [0, 1].
+
+        Returns
+        -------
+        AshDisperseResult
+            A new AshDisperseResult instance with updated grain proportions.
+
+        Raises
+        ------
+        RuntimeError
+            If the length of `props` does not match the number of grain size classes
+            (`self.params.grains.bins`).
+        ValueError
+            If any element in `props` is outside the valid range [0, 1]. Each proportion
+            must be a float between 0 and 1 inclusive, representing the fraction of material
+            in that grain size class.
+
+        Examples
+        --------
+        Change original_result with three grain classes
+            >>> result = original_result.change_grain_proportions([0.2, 0.3, 0.5])
+            >>> result.params.grains.proportion
+            array([0.2, 0.3, 0.5])
+        """
+        
+        if len(props) != self.params.grains.bins:
             raise RuntimeError(f'length of props must equal number of grain size classes ({self.params.grains.bins})')
 
-        params = self.params
+        params = copy_parameters(self.params)
         for j, p in enumerate(props):
+            if p<0 or p>1:
+                raise ValueError(f"proportion must be in range [0,1], recieved {p}")
             params.grains.proportion[j] = np.float64(p)
 
-        self.params.model.from_params(
+        params.model.from_params(
             params,
             params.model.xScale,
             params.model.yScale
         )
+        return AshDisperseResult(params, self.C0_FT, self.Cz_FT)
 
-        self.__init__(params, self.C0_FT, self.Cz_FT)
-        self._changed_gsd = True
 
     @classmethod
-    def from_netcdf(cls, filename):
-        """Initialize results from a netcdf file"""
+    def from_netcdf(cls, filename: str) -> AshDisperseResult:
+        """
+        Create an :class:`AshDisperseResult` from a NetCDF file.
+
+        This classmethod loads a NetCDF dataset, reconstructs the full set of model
+        parameters (solver, grains, source, emission, physical, meteorology, output,
+        and model parameters), and returns a new result object populated with the
+        spectral fields `C0_FT` and `Cz_FT`.
+
+        The method attempts to handle both scalar and array encodings for several
+        parameter groups (e.g., grains, emission, model), choosing between
+        ``from_values`` and ``from_lists`` depending on the underlying type.
+
+        Parameters
+        ----------
+        filename : str
+            Path to the NetCDF file containing AshDisperse output. This file is
+            expected to include fields such as ``version``, solver domain and grid
+            settings, grain properties (diameter, density, proportion), source
+            parameters, emission profile parameters, physical constants, meteorology,
+            output scheduling, model scaling parameters, and the real/imaginary parts
+            of the spectral fields:
+            ``C0_FT_r``, ``C0_FT_i``, ``Cz_FT_r``, and ``Cz_FT_i``.
+
+        Returns
+        -------
+        Self
+            A new instance of :class:`AshDisperseResult` initialized from the
+            contents of the NetCDF file.
+
+        Raises
+        ------
+        FileNotFoundError
+            If ``filename`` does not exist.
+        OSError
+            If the file cannot be opened or read as a NetCDF dataset.
+        KeyError
+            If required variables are missing from the dataset (e.g., grid settings,
+            grain properties, spectral components).
+        ValueError
+            If variable shapes or dtypes are incompatible with the expected parameter
+            constructors (e.g., mismatched array lengths across diameter/density/
+            proportion or emission profiles).
+
+        Warnings
+        --------
+        UserWarning
+            If the dataset version (``da.version``) differs from the current library
+            version (``__version__``). The method continues but warns about possible
+            incompatibilities.
+
+        Notes
+        -----
+        - Grain parameters:
+        Switches between ``GrainParameters.from_values`` and
+        ``GrainParameters.from_lists`` depending on whether ``da.diameter`` is
+        loaded as a scalar (``np.float64``) or an array-like.
+        - Emission parameters:
+        Similarly selects ``EmissionParameters.from_values`` vs ``from_lists``
+        based on the type of ``da.emission_lower``.
+        - Model parameters:
+        Chooses ``ModelParameters.from_values`` vs ``from_lists`` using the type
+        of ``da.SettlingScale``.
+        - Spectral fields:
+        The complex arrays are reconstructed from their real and imaginary parts as
+        ``C0_FT = C0_FT_r + 1j * C0_FT_i`` and ``Cz_FT = Cz_FT_r + 1j * Cz_FT_i``.
+
+        Examples
+        --------
+        >>> result = AshDisperseResult.from_netcdf("outputs/ashdisperse_run.nc")
+        >>> result.params.solver.Nx_log2, result.params.solver.Ny_log2
+        (10, 10)
+        >>> result.C0_FT.shape, result.Cz_FT.shape
+        ((256, 256), (256, 256))
+        """
         da = xa.load_dataset(filename)
 
         if da.version != __version__:
@@ -355,12 +817,79 @@ class AshDisperseResult:
         C0_FT = da.C0_FT_r.values + 1j*da.C0_FT_i.values
         Cz_FT = da.Cz_FT_r.values + 1j*da.Cz_FT_i.values
 
-        cls = AshDisperseResult(p, C0_FT, Cz_FT)
+        return AshDisperseResult(p, C0_FT, Cz_FT)
 
-        return cls
+    
+    def to_netcdf(self, filename: str = "AshDisperse.nc", compress: bool = True, complevel: int = 5) -> None:
+        """
+        Save the current :class:`AshDisperseResult` to a NetCDF file.
 
-    def to_netcdf(self, filename="AshDisperse.nc", compress=True, complevel=5):
-        """Save AshDisperse results to a netCDF file"""
+        This method writes the complex spectral fields and all associated model
+        parameters to a NetCDF file using the ``h5netcdf`` engine. Complex arrays
+        are stored as separate real and imaginary components.
+
+        Parameters
+        ----------
+        filename : str, optional
+            Output file path. If the file exists, it will be overwritten.
+            Default is ``"AshDisperse.nc"``.
+        compress : bool, optional
+            Whether to apply zlib compression to data variables. Default is ``True``.
+        complevel : int, optional
+            Compression level passed to zlib (typically in the range 0-9).
+            Ignored if ``compress=False``. Default is ``5``.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        PermissionError
+            If the file cannot be created or overwritten due to insufficient
+            permissions or the path is not writable.
+        OSError
+            If there is a low-level I/O or HDF5/NetCDF issue while writing.
+        ValueError
+            If an invalid ``complevel`` is provided (e.g., out of the supported
+            range for the underlying zlib implementation) or if array shapes are
+            inconsistent with the declared dimensions.
+
+        Notes
+        -----
+        **Data variables** (stored as float arrays):
+        - ``C0_FT_r``: Real part of ``C0_FT`` with dims ``("ky", "kx", "grains")``  
+        - ``C0_FT_i``: Imag part of ``C0_FT`` with dims ``("ky", "kx", "grains")``  
+        - ``Cz_FT_r``: Real part of ``Cz_FT`` with dims ``("ky", "kx", "z", "grains")``  
+        - ``Cz_FT_i``: Imag part of ``Cz_FT`` with dims ``("ky", "kx", "z", "grains")``
+
+        **Coordinates**:
+        - ``grains``: ``range(self.params.grains.bins)``
+        - ``kx``: ``self.kx[: Nx // 2 + 1]`` (positive and zero wavenumbers)
+        - ``ky``: ``self.ky``
+        - ``z``: ``self.params.output.altitudes``
+
+        **Global attributes** include solver/domain configuration, grain parameters
+        (``diameter``, ``density``, ``proportion``), source parameters (location,
+        plume, MER, duration), emission profile, physical constants, meteorology,
+        model scaling, and output schedule. The current package ``version`` is also
+        recorded.
+
+        **Compression and encoding**:
+        If ``compress=True``, all data variables are written with
+        ``zlib=True`` and ``complevel=complevel``. If ``compress=False``,
+        the dataset is written without compression.
+
+        **File format and engine**:
+        The file is written with ``format="NETCDF4"`` using the
+        ``engine="h5netcdf"`` backend.
+
+        Examples
+        --------
+        >>> result.to_netcdf("outputs/ashdisperse_run.nc")
+        >>> result.to_netcdf("outputs/run_compressed.nc", compress=True, complevel=9)
+        >>> result.to_netcdf("outputs/run_uncompressed.nc    >>> result.to_netcdf("outputs/run_uncompressed.nc", compress=False)
+        """
         Nx = self.params.solver.Nx
         da = xa.Dataset(
             data_vars=dict(
@@ -445,18 +974,94 @@ class AshDisperseResult:
 
         return
 
-    def _check_valid_grain(self, grain_i):
-        if grain_i > self.params.grains.bins:
-            raise ValueError(
+
+    def _check_valid_grain(self, grain_i: int) -> None:
+        """
+        Utility to check if requested grain index is within result set
+
+        Parameters
+        ----------
+        grain_i : int
+            index for the grain class
+
+        Raises
+        ------
+        IndexError
+            If requested index, grain_i, is not in the grain class
+        ValueError
+            If grain_i is negative
+        """
+        if grain_i >= self.params.grains.bins:
+            raise IndexError(
                 "Requested grain class not found; given {}".format(grain_i)
                 + " in results with"
                 + " {} grain classes.".format(self.params.grains.bins)
             )
         if grain_i < 0:
-            raise ValueError("Grain class index must be positive")
+            raise ValueError("Grain class index must be non-negative")
+        return
 
 
-    def get_groundconc_for_grain_class(self, grain_i, vmin=1e-9, masked=False):
+    
+    def get_groundconc_for_grain_class(
+        self,
+        grain_i: int,
+        vmin: float = 1e-9,
+        masked: bool = False,
+        clipped: bool = True
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """
+        Retrieve the ground-level concentration grid for a specific grain size class.
+
+        This method extracts the concentration field for the given grain class at
+        ground level, optionally masking low values and/or clipping the grid to the
+        minimal bounding region containing valid data.
+
+        Parameters
+        ----------
+        grain_i : int
+            Zero-based index of the grain size class to extract.
+        vmin : float, optional
+            Minimum concentration threshold. Values below this threshold are treated
+            as absent. Default is ``1e-9``.
+        masked : bool, optional
+            If ``True``, return a masked array where values below ``vmin`` are masked.
+            Default is ``False``.
+        clipped : bool, optional
+            If ``True``, clip the returned grid to the smallest bounding box that
+            contains all values above ``vmin``. If ``False``, return the full model
+            grid for the grain class. Default is ``True``.
+
+        Returns
+        -------
+        tuple of ndarray or None
+            If valid data exists, returns a tuple ``(x, y, conc)``:
+            - ``x`` : 1D ndarray of x-coordinates (model units)
+            - ``y`` : 1D ndarray of y-coordinates (model units)
+            - ``conc`` : 2D ndarray or MaskedArray of concentrations with shape
+            ``(ny, nx)``
+            If no valid data exists (e.g., all values below ``vmin`` or clipped
+            region is empty), returns ``None``.
+
+        Raises
+        ------
+        IndexError
+            If ``grain_i`` is out of range for the available grain size classes.
+        ValueError
+            If ``grain_i`` is negative.
+
+        Notes
+        -----
+        - Use ``masked=True`` to obtain a masked array suitable for plotting or
+        further filtering.
+        - When ``clipped=True``, the returned coordinates and grid are cropped to
+        the minimal region containing concentrations above ``vmin``.
+        - If all concentrations are below ``vmin``, the method returns ``None``.
+
+        Examples
+        --------
+        >>> x, y, conc = result.get_groundconc_for_grain_class(0, vmin=1e-8, masked=True)
+        """
         self._check_valid_grain(grain_i)
 
         x = self.x[:, grain_i]
@@ -464,11 +1069,14 @@ class AshDisperseResult:
 
         conc = self.C0[:, :, grain_i]
 
-        conc, x, y = _clip_to_window(conc, x, y, vmin=vmin)
+        if clipped:
+            conc, x, y = _clip_to_window(conc, x, y, vmin=vmin)
 
-        if conc.size == 0:
-            return None
+            # If the clipped window is empty, return None to indicate no data
+            if conc.size == 0:
+                return None
 
+        # If all values are below vmin, treat as no-data for consistency
         if np.nanmax(conc) < vmin:
             return None
 
@@ -478,7 +1086,65 @@ class AshDisperseResult:
         return x, y, conc
 
 
-    def get_settlingflux_for_grain_class(self, grain_i, vmin=1e-7, masked=False):
+
+    def get_settlingflux_for_grain_class(
+        self,
+        grain_i: int,
+        vmin: float = 1e-7,
+        masked: bool = False,
+        clipped: bool = True
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """
+        Retrieve the ground-level settling flux (mass flux to surface) for a specific grain size class.
+
+        This method extracts the settling flux field for the given grain class at ground level,
+        optionally masking low values and/or clipping the grid to the minimal bounding region
+        containing valid flux data.
+
+        Parameters
+        ----------
+        grain_i : int
+            Zero-based index of the grain size class to extract.
+        vmin : float, optional
+            Minimum flux threshold (kg/m²/s). Values below this threshold are treated as absent.
+            Default is ``1e-7``.
+        masked : bool, optional
+            If ``True``, return a masked array where values below ``vmin`` are masked.
+            Default is ``False``.
+        clipped : bool, optional
+            If ``True``, clip the returned grid to the smallest bounding box that contains all
+            values above ``vmin``. If ``False``, return the full model grid for the grain class.
+            Default is ``True``.
+
+        Returns
+        -------
+        tuple of ndarray or None
+            If valid data exists, returns a tuple ``(x, y, flux)``:
+            - ``x`` : 1D ndarray of x-coordinates (model units)
+            - ``y`` : 1D ndarray of y-coordinates (model units)
+            - ``flux`` : 2D ndarray or MaskedArray of settling flux values with shape ``(ny, nx)``
+            If no valid data exists (e.g., all values below ``vmin`` or clipped region is empty),
+            returns ``None``.
+
+        Raises
+        ------
+        IndexError
+            If ``grain_i`` is out of range for the available grain size classes.
+        ValueError
+            If ``grain_i`` is negative.
+
+        Notes
+        -----
+        - Settling flux represents the mass flux to the ground surface for the specified grain class.
+        - Use ``masked=True`` to obtain a masked array suitable for plotting or further filtering.
+        - When ``clipped=True``, the returned coordinates and grid are cropped to the minimal region
+        containing flux values above ``vmin``.
+        - If all flux values are below ``vmin``, the method returns ``None``.
+
+        Examples
+        --------
+        >>> x, y, flux = result.get_settlingflux_for_grain_class(1, vmin=1e-6, masked=True)
+        """
         self._check_valid_grain(grain_i)
 
         x = self.x[:, grain_i]
@@ -486,7 +1152,8 @@ class AshDisperseResult:
 
         flux = self.SettlingFlux[:, :, grain_i]
 
-        flux, x, y = _clip_to_window(flux, x, y, vmin=vmin)
+        if clipped:
+            flux, x, y = _clip_to_window(flux, x, y, vmin=vmin)
 
         if flux.size == 0:
             return None
@@ -499,7 +1166,75 @@ class AshDisperseResult:
 
         return x, y, flux
 
-    def get_ashload_for_grain_class(self, grain_i, vmin=1e-5, masked=False, clipped=True):
+
+    
+    def get_ashload_for_grain_class(
+        self,
+        grain_i: int,
+        vmin: float = 1e-5,
+        masked: bool = False,
+        clipped: bool = True
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """
+        Retrieve the ground-level ash load grid for a specific grain size class.
+
+        Ash load represents the total deposited mass per unit area (kg/m²) for the
+        specified grain class, computed as:
+
+        ``ashload = settling_flux * eruption_duration``
+
+        Parameters
+        ----------
+        grain_i : int
+            Zero-based index of the grain size class to extract.
+        vmin : float, optional
+            Minimum ash load threshold (kg/m²). Values below this threshold are treated
+            as absent. Default is ``1e-5``.
+        masked : bool, optional
+            If ``True``, return a masked array where values below ``vmin`` are masked.
+            Default is ``False``.
+        clipped : bool, optional
+            If ``True``, clip the returned grid to the smallest bounding box that contains
+            all values above ``vmin``. If ``False``, return the full model grid for the
+            grain class. Default is ``True``.
+
+        Returns
+        -------
+        tuple of ndarray or None
+            If valid data exists, returns a tuple ``(x, y, ashload)``:
+            - ``x`` : 1D ndarray of x-coordinates (model units)
+            - ``y`` : 1D ndarray of y-coordinates (model units)
+            - ``ashload`` : 2D ndarray or MaskedArray of ash load values (kg/m²) with
+            shape ``(ny, nx)``
+            If no valid data exists (e.g., all values below ``vmin`` or clipped region
+            is empty), returns ``None``.
+
+        Raises
+        ------
+        IndexError
+            If ``grain_i`` is out of range for the available grain size classes.
+        ValueError
+            If ``grain_i`` is negative.
+
+        Notes
+        -----
+        - Ash load is derived from the precomputed settling flux multiplied by the
+        eruption duration.
+        - Use ``masked=True`` to obtain a masked array suitable for plotting or further
+        filtering.
+        - When ``clipped=True``, the returned coordinates and grid are cropped to the
+        minimal region containing ash load values above ``vmin``.
+        - If all ash load values are below ``vmin``, the method returns ``None``.
+
+        See Also
+        --------
+        get_settlingflux_for_grain_class : Retrieve settling flux (kg/m²/s) for a grain class.
+        raster_ashload_for_grain_class : Export ash load as an xarray.Dataset with geospatial metadata.
+
+        Examples
+        --------
+        >>> x, y, ashload = result.get_ashload_for_grain_class(2, vmin=1e-4, masked=True)
+        """
         self._check_valid_grain(grain_i)
 
         x = self.x[:, grain_i]
@@ -521,47 +1256,23 @@ class AshDisperseResult:
 
         return x, y, ashload
 
-    def POI_ashload_for_grain_class(
-        self, grain_i: int, lat: float, lon: float, vmin: float = 1e-3
-    ):
-        self._check_valid_grain(grain_i)
 
-        df = pd.DataFrame(columns=["Name", "Latitude", "Longitude"])
-        df.loc[0] = ["POI", lat, lon]
-        POI = gpd.GeoDataFrame(
-            df,
-            geometry=gpd.points_from_xy(df.Longitude, df.Latitude),
-            crs=wgs84["init"],
+    def POI_ashload_for_grain_class(
+        self, grain_i: int, latlon: Point | PointList, vmin: float = 1e-3
+    ) -> float | np.ndarray:
+        self._check_valid_grain(grain_i)
+        ds = self.raster_ashload_for_grain_class(
+            grain_i, vmin=vmin, nodata=np.nan, masked=False, crs=None
         )
 
-        POI = POI.to_crs(self.utmepsg)
+        return _sample_point_from_dataset(ds, ds.rio.crs, latlon=latlon, var="ash_load", fallback=0)
 
-        try:
-            ashload = self.raster_ashload_for_grain_class(
-                grain_i, vmin=vmin, nodata=np.nan, masked=False, crs=None
-            )
-
-            POI_ashload = ashload.interp(
-                x=POI.geometry.x, y=POI.geometry.y, method="cubic"
-            )
-
-            load = POI_ashload["ash_load"].values[0][0]
-
-            if np.isnan(load):
-                return 0
-            elif load < 0:
-                return 0
-            else:
-                return load
-        except:
-            return 0
-
-    def POI_ashload(self, lat: float, lon: float, vmin: float = 1e-3):
+    def POI_ashload(self, latlon: Point | PointList, vmin: float = 1e-3) -> tuple[float, list[dict[str, float|np.ndarray]]]:
 
         loads = []
         total_load = 0
         for j in range(self.grain_classes):
-            this_ashload = self.POI_ashload_for_grain_class(j, lat, lon, vmin)
+            this_ashload = self.POI_ashload_for_grain_class(j, latlon, vmin)
             loads.append(
                 {
                     "diameter": self.params.grains.diameter[j],
@@ -575,48 +1286,21 @@ class AshDisperseResult:
         return total_load, loads
 
     def POI_groundconc_for_grain_class(
-        self, grain_i: int, lat: float, lon: float, vmin: float = 1e-3
+        self, grain_i: int, latlon: Point | PointList, vmin: float = 1e-3
     ):
         self._check_valid_grain(grain_i)
-
-        df = pd.DataFrame(columns=["Name", "Latitude", "Longitude"])
-        df.loc[0] = ["POI", lat, lon]
-        POI = gpd.GeoDataFrame(
-            df,
-            geometry=gpd.points_from_xy(df.Longitude, df.Latitude),
-            crs=wgs84["init"],
+        ds = self.raster_groundconc_for_grain_class(
+            grain_i, vmin=vmin, nodata=np.nan, masked=False, crs=None
         )
 
-        POI = POI.to_crs(self.utmepsg)
+        return _sample_point_from_dataset(ds, ds.rio.crs, latlon=latlon, var="ground_concentration", fallback=0)
 
-        try:
-            
-            conc = self.raster_groundconc_for_grain_class(
-
-                grain_i, vmin=vmin, nodata=np.nan, masked=False, crs=None
-            )
-
-            POI_ashload = conc.interp(
-                x=POI.geometry.x, y=POI.geometry.y, method="cubic"
-            )
-
-            load = POI_ashload["ground_concentration"].values[0][0]
-
-            if np.isnan(load):
-                return 0
-            elif load < 0:
-                return 0
-            else:
-                return load
-        except:
-            return 0
-
-    def POI_groundconc(self, lat: float, lon: float, vmin: float = 1e-3):
+    def POI_groundconc(self, latlon: Point | PointList, vmin: float = 1e-3):
 
         concs = []
         total_conc = 0
         for j in range(self.grain_classes):
-            this_conc = self.POI_groundconc_for_grain_class(j, lat, lon, vmin)
+            this_conc = self.POI_groundconc_for_grain_class(j, latlon, vmin)
             concs.append(
                 {
                     "diameter": self.params.grains.diameter[j],
@@ -630,48 +1314,21 @@ class AshDisperseResult:
         return total_conc, concs
     
     def POI_settlingflux_for_grain_class(
-        self, grain_i: int, lat: float, lon: float, vmin: float = 1e-3
+        self, grain_i: int, latlon: Point | PointList, vmin: float = 1e-3
     ):
         self._check_valid_grain(grain_i)
-
-        df = pd.DataFrame(columns=["Name", "Latitude", "Longitude"])
-        df.loc[0] = ["POI", lat, lon]
-        POI = gpd.GeoDataFrame(
-            df,
-            geometry=gpd.points_from_xy(df.Longitude, df.Latitude),
-            crs=wgs84["init"],
+        ds = self.raster_settlingflux_for_grain_class(
+            grain_i, vmin=vmin, nodata=np.nan, masked=False, crs=None
         )
 
-        POI = POI.to_crs(self.utmepsg)
+        return _sample_point_from_dataset(ds, ds.rio.crs, latlon=latlon, var="settling_flux", fallback=0)
 
-        try:
-            
-            flux = self.raster_settlingflux_for_grain_class(
-
-                grain_i, vmin=vmin, nodata=np.nan, masked=False, crs=None
-            )
-
-            POI_flux = flux.interp(
-                x=POI.geometry.x, y=POI.geometry.y, method="cubic"
-            )
-
-            flux = POI_flux["settling_flux"].values[0][0]
-
-            if np.isnan(flux):
-                return 0
-            elif flux < 0:
-                return 0
-            else:
-                return flux
-        except:
-            return 0
-
-    def POI_settlingflux(self, lat: float, lon: float, vmin: float = 1e-3):
+    def POI_settlingflux(self, latlon: Point | PointList, vmin: float = 1e-3):
 
         fluxes = []
         total_flux = 0
         for j in range(self.grain_classes):
-            this_flux = self.POI_settlingflux_for_grain_class(j, lat, lon, vmin)
+            this_flux = self.POI_settlingflux_for_grain_class(j, latlon, vmin)
             fluxes.append(
                 {
                     "diameter": self.params.grains.diameter[j],
@@ -684,32 +1341,40 @@ class AshDisperseResult:
 
         return total_flux, fluxes
 
-    def max_ashload_for_grain_class(self, grain_i):
+    def max_ashload_for_grain_class(self, grain_i: int):
         self._check_valid_grain(grain_i)
         return np.nanmax(self.SettlingFlux[:, :, grain_i]) * self.params.source.duration
 
+    def _array_to_dataset(
+        self,
+        name: str,
+        x: np.ndarray,
+        y: np.ndarray,
+        arr: np.ndarray | None,
+        units: str,
+        short_name: Optional[str]=None,
+        long_name: Optional[str]=None,
+        nodata: Optional[float]=np.nan,
+        crs: Optional[str]=None,
+    ) -> xa.Dataset:
+        """Helper: wrap x/y/array into an xarray.Dataset with rio metadata.
 
-    def raster_groundconc_for_grain_class(
-        self, grain_i, vmin=1e-9, nodata=np.nan, masked=False, crs=None
-    ):
-
-        x, y, conc = self.get_groundconc_for_grain_class(
-            grain_i, vmin=vmin, masked=masked
-        )
+        Returns None if `arr` is None.
+        """
+        if arr is None:
+            return None
 
         ds = xa.Dataset()
         ds.coords["x"] = x + self.utm[0]
         ds.coords["y"] = y + self.utm[1]
 
-        ds["ground_concentration"] = (("y", "x"), conc)
-        ds["ground_concentration"].attrs["short_name"] = "ground_concentration_{}".format(grain_i)
-        ds["ground_concentration"].attrs[
-            "long_name"
-        ] = "concentration at ground level for grain size {} m".format(
-            self.params.grains.diameter[grain_i]
-        )
-        ds["ground_concentration"].attrs["units"] = "kg/m**3"
-        ds["ground_concentration"].rio.write_nodata(nodata, inplace=True)
+        ds[name] = (("y", "x"), arr)
+        if short_name is not None:
+            ds[name].attrs["short_name"] = short_name
+        if long_name is not None:
+            ds[name].attrs["long_name"] = long_name
+        ds[name].attrs["units"] = units
+        ds[name].rio.write_nodata(nodata, inplace=True)
 
         ds.x.attrs["units"] = "metres"
         ds.y.attrs["units"] = "metres"
@@ -720,136 +1385,143 @@ class AshDisperseResult:
             ds = ds.rio.reproject(crs, resampling=Resampling.cubic)
 
         return ds
+
+
+    def raster_groundconc_for_grain_class(
+        self, grain_i: int, vmin: float=1e-9, nodata: float=np.nan, masked: bool=False, clipped: bool=True, crs: Optional[str]=None
+    ) -> xa.Dataset:
+        data = self.get_groundconc_for_grain_class(grain_i, vmin=vmin, masked=masked, clipped=clipped)
+        if data is None:
+            return None
+        x, y, conc = data
+
+        return self._array_to_dataset(
+            name="ground_concentration",
+            x=x,
+            y=y,
+            arr=conc,
+            units="kg/m**3",
+            short_name=f"ground_concentration_{grain_i}",
+            long_name=(
+                f"concentration at ground level for grain size {self.params.grains.diameter[grain_i]} m"
+            ),
+            nodata=nodata,
+            crs=crs,
+        )
 
 
     def raster_settlingflux_for_grain_class(
-        self, grain_i, vmin=1e-6, nodata=np.nan, masked=False, crs=None
-    ):
+        self, grain_i: int, vmin: float=1e-6, nodata: float=np.nan, masked: bool=False, clipped: bool=True, crs: Optional[str]=None
+    ) -> xa.Dataset:
+        data = self.get_settlingflux_for_grain_class(grain_i, vmin=vmin, masked=masked, clipped=clipped)
+        if data is None:
+            return None
+        x, y, flux = data
 
-        x, y, flux = self.get_settlingflux_for_grain_class(
-            grain_i, vmin=vmin, masked=masked
+        return self._array_to_dataset(
+            name="settling_flux",
+            x=x,
+            y=y,
+            arr=flux,
+            units="kg/m**2/s",
+            short_name=f"settling_flux_{grain_i}",
+            long_name=(
+                f"settling flux at ground level for grain size {self.params.grains.diameter[grain_i]} m"
+            ),
+            nodata=nodata,
+            crs=crs,
         )
 
-        ds = xa.Dataset()
-        ds.coords["x"] = x + self.utm[0]
-        ds.coords["y"] = y + self.utm[1]
-
-        ds["settling_flux"] = (("y", "x"), flux)
-        ds["settling_flux"].attrs["short_name"] = "settling_flux_{}".format(grain_i)
-        ds["settling_flux"].attrs[
-            "long_name"
-        ] = "settling flux at ground level for grain size {} m".format(
-            self.params.grains.diameter[grain_i]
-        )
-        ds["settling_flux"].attrs["units"] = "kg/m**2/s"
-        ds["settling_flux"].rio.write_nodata(nodata, inplace=True)
-
-        ds.x.attrs["units"] = "metres"
-        ds.y.attrs["units"] = "metres"
-
-        ds = ds.rio.write_crs(self.utmepsg)
-
-        if crs is not None:
-            ds = ds.rio.reproject(crs, resampling=Resampling.cubic)
-
-        return ds
 
     def raster_ashload_for_grain_class(
-        self, grain_i, vmin=1e-2, nodata=np.nan, masked=False, clipped=True, crs=None
-    ):
-
-        x, y, ashload = self.get_ashload_for_grain_class(
+        self, grain_i: int, vmin: float=1e-2, nodata: float=np.nan, masked: bool=False, clipped: bool=True, crs: Optional[str]=None
+    ) -> xa.Dataset:
+        data = self.get_ashload_for_grain_class(
             grain_i, vmin=vmin, masked=masked, clipped=clipped,
         )
+        if data is None:
+            return None
+        x, y, ashload = data
 
-        ds = xa.Dataset()
-        ds.coords["x"] = x + self.utm[0]
-        ds.coords["y"] = y + self.utm[1]
-
-        ds["ash_load"] = (("y", "x"), ashload)
-        ds["ash_load"].attrs["short_name"] = "ash_load_{}".format(grain_i)
-        ds["ash_load"].attrs[
-            "long_name"
-        ] = "ash load at ground level for grain size {} m".format(
-            self.params.grains.diameter[grain_i]
+        return self._array_to_dataset(
+            name="ash_load",
+            x=x,
+            y=y,
+            arr=ashload,
+            units="kg/m**2",
+            short_name=f"ash_load_{grain_i}",
+            long_name=(
+                f"ash load at ground level for grain size {self.params.grains.diameter[grain_i]} m"
+            ),
+            nodata=nodata,
+            crs=crs,
         )
-        ds["ash_load"].attrs["units"] = "kg/m**2"
-        ds["ash_load"].rio.write_nodata(nodata, inplace=True)
-
-        ds.x.attrs["units"] = "metres"
-        ds.y.attrs["units"] = "metres"
-
-        ds = ds.rio.write_crs(self.utmepsg)
-
-        if crs is not None:
-            ds = ds.rio.reproject(crs, resampling=Resampling.cubic, nodata=nodata)
-
-        return ds
     
 
-    def _raster_contour(self, raster, name, cntrs):
+    # def _raster_contour(self, raster, name, cntrs):
 
-        data = raster.data
-        x = raster.x.data
-        y = raster.y.data
-        crs = raster.rio.crs
+    #     data = raster.data
+    #     x = raster.x.data
+    #     y = raster.y.data
+    #     crs = raster.rio.crs
 
-        data_min = np.nanmin(data)
-        data_max = np.nanmax(data)
-        data_max = nice_round_up(data_max, mag=10 ** np.floor(np.log10(data_max)))
+    #     data_min = np.nanmin(data)
+    #     data_max = np.nanmax(data)
+    #     data_max = nice_round_up(data_max, mag=10 ** np.floor(np.log10(data_max)))
 
-        fx = interp1d(np.arange(0, len(x)), x)
-        fy = interp1d(np.arange(0, len(y)), y)
+    #     fx = interp1d(np.arange(0, len(x)), x)
+    #     fy = interp1d(np.arange(0, len(y)), y)
 
-        cntrs = cntrs[cntrs > data_min]
-        cntrs = cntrs[cntrs < data_max]
+    #     cntrs = cntrs[cntrs > data_min]
+    #     cntrs = cntrs[cntrs < data_max]
 
-        for kk, this_cntr in enumerate(cntrs):
+    #     for kk, this_cntr in enumerate(cntrs):
 
-            C = find_contours(data, this_cntr)
+    #         C = find_contours(data, this_cntr)
 
-            if len(C) == 0:
-                pass
-            for jj, p in enumerate(C):
-                p[:, 0] = fy(p[:, 0])
-                p[:, 1] = fx(p[:, 1])
+    #         if len(C) == 0:
+    #             pass
+    #         for jj, p in enumerate(C):
+    #             p[:, 0] = fy(p[:, 0])
+    #             p[:, 1] = fx(p[:, 1])
 
-                p[:, [0, 1]] = p[:, [1, 0]]
+    #             p[:, [0, 1]] = p[:, [1, 0]]
 
-                if len(p[:, 1]) > 2:
-                    thisPoly = Polygon(p).buffer(0)
-                    if not thisPoly.is_empty:
-                        if jj == 0:
-                            geom = thisPoly
-                            g_tmp = gpd.GeoDataFrame(
-                                columns=["contour", "name", "geometry"], crs=crs
-                            )
-                            g_tmp.loc[0, "contour"] = this_cntr
-                            g_tmp.loc[[0], "geometry"] = gpd.GeoSeries([geom])
-                            g_tmp.loc[0, "name"] = name
-                        else:
-                            if g_tmp.loc[0, "geometry"].contains(thisPoly):
-                                geom = g_tmp.loc[0, "geometry"].difference(thisPoly)
-                            else:
-                                try:
-                                    geom = g_tmp.loc[0, "geometry"].union(thisPoly)
-                                except:
-                                    print(
-                                        "Error processing polygon contour -- skipping.  Better check the result!"
-                                    )
-                            g_tmp.loc[[0], "geometry"] = gpd.GeoSeries([geom])
+    #             if len(p[:, 1]) > 2:
+    #                 thisPoly = Polygon(p).buffer(0)
+    #                 if not thisPoly.is_empty:
+    #                     if jj == 0:
+    #                         geom = thisPoly
+    #                         g_tmp = gpd.GeoDataFrame(
+    #                             columns=["contour", "name", "geometry"], crs=crs
+    #                         )
+    #                         g_tmp.loc[0, "contour"] = this_cntr
+    #                         g_tmp.loc[[0], "geometry"] = gpd.GeoSeries([geom])
+    #                         g_tmp.loc[0, "name"] = name
+    #                     else:
+    #                         if g_tmp.loc[0, "geometry"].contains(thisPoly):
+    #                             geom = g_tmp.loc[0, "geometry"].difference(thisPoly)
+    #                         else:
+    #                             try:
+    #                                 geom = g_tmp.loc[0, "geometry"].union(thisPoly)
+    #                             except:
+    #                                 print(
+    #                                     "Error processing polygon contour -- skipping.  Better check the result!"
+    #                                 )
+    #                         g_tmp.loc[[0], "geometry"] = gpd.GeoSeries([geom])
 
-            if kk == 0:
-                g = gpd.GeoDataFrame(g_tmp).set_geometry("geometry")
-            else:
-                g = gpd.GeoDataFrame(pd.concat([g, g_tmp], ignore_index=True))
+    #         if kk == 0:
+    #             g = gpd.GeoDataFrame(g_tmp).set_geometry("geometry")
+    #         else:
+    #             g = gpd.GeoDataFrame(pd.concat([g, g_tmp], ignore_index=True))
 
-        g["contour"] = g["contour"].astype("float64")
-        g.crs = crs
+    #     g["contour"] = g["contour"].astype("float64")
+    #     g.crs = crs
 
-        return g
+    #     return g
 
-    def write_gtiff(self, raster, x, y, outname, nodata=-1, vmin=1e-6, resolution=None):
+    def write_gtiff(self, raster: np.ndarray, x: np.ndarray, y: np.ndarray, outname: str, 
+                    nodata: float=-1, vmin: float=1e-6, resolution: Optional[float]=None) -> None:
 
         print("Writing data to {outname}".format(outname=outname))
         if os.path.isfile(outname):
@@ -861,7 +1533,7 @@ class AshDisperseResult:
         utmcode = self.params.source.utmcode
 
         if resolution is not None:
-            raster, x, y = _interpolate(
+            x, y, raster = _interpolate(
                 raster, x, y, resolution, nodata=nodata, vmin=vmin
             )
 
@@ -893,9 +1565,10 @@ class AshDisperseResult:
         ) as dst:
             dst.write(np.flipud(raster), 1)
 
+
     def write_settling_flux_for_grain_class(
-        self, grain_i, nodata=-1, vmin=1e-6, resolution=None
-    ):
+        self, grain_i: int, nodata: float=-1.0, vmin: float=1e-6, resolution: Optional[float]=None,
+    ) -> None:
         self._check_valid_grain(grain_i)
         self.write_gtiff(
             self.SettlingFlux[:, :, grain_i],
@@ -907,9 +1580,10 @@ class AshDisperseResult:
             resolution=resolution,
         )
 
+
     def write_ashload_for_grain_class(
-        self, grain_i, vmin=1e-3, resolution=None, outname=None, compress='LZW',
-    ):
+        self, grain_i: int, vmin: float=1e-3, resolution: Optional[float]=None, outname: Optional[str]=None, compress: str='LZW',
+    ) -> None:
         self._check_valid_grain(grain_i)
 
         ashload = self.raster_ashload_for_grain_class(grain_i, vmin=vmin, masked=False)
@@ -937,17 +1611,44 @@ class AshDisperseResult:
             )
 
         ashload.rio.to_raster(outname, compress=compress)
-        return
+    
 
     def get_ashload(
         self,
-        resolution=300.0,
-        vmin=1e-3,
-        nodata=-1,
-        export_gtiff=True,
-        export_name="AshLoad.tif",
-    ):
+        resolution: float=300.0,
+        vmin: float=1e-3,
+        nodata: float=-1.0,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # Delegate numeric aggregation to compute_total_ashload
+        x_out, y_out, totalAshLoad = self.get_total_ashload(
+            resolution=resolution, vmin=vmin, nodata=nodata
+        )
 
+        return x_out, y_out, totalAshLoad
+
+    def get_total_ashload(self, 
+                        resolution: float=300.0, 
+                        vmin: float=1e-3, 
+                        nodata: float=-1.0, 
+                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Compute aggregated total ash load raster from all grain-class settling fluxes.
+
+        Parameters
+        ----------
+        resolution : float, optional
+            Output grid resolution in model units (default: 300.0).
+        vmin : float, optional
+            Minimum value to keep (values below are masked/nodata, default: 1e-3).
+        nodata : float, optional
+            Value to use for nodata in output arrays (default: -1).
+
+        Returns
+        -------
+        (x, y, totalAshLoad) : tuple of arrays,
+            x, y are 1D arrays of coordinates; totalAshLoad is a masked 2D array.
+                            
+        """
         ash_load_grains = self.SettlingFlux * self.params.source.duration
         Ngrains = self.params.grains.bins
 
@@ -985,7 +1686,6 @@ class AshDisperseResult:
 
         width = int((right - left) / resolution) + 1
         height = int((top - bottom) / resolution) + 1
-        print("Output raster shape is ({h},{w})".format(h=height, w=width))
 
         x_out = np.linspace(left, right, num=width, endpoint=True)
         y_out = np.linspace(bottom, top, num=height, endpoint=True)
@@ -1015,71 +1715,106 @@ class AshDisperseResult:
         x_out = x_out[winpad["col_start"] : winpad["col_stop"]]
         y_out = y_out[winpad["row_start"] : winpad["row_stop"]]
 
-        if export_gtiff:
-            self.write_gtiff(
-                totalAshLoad,
-                x_out,
-                y_out,
-                export_name,
-                nodata=nodata,
-                vmin=vmin,
-                resolution=None,
-            )
         totalAshLoad = np.ma.masked_where(totalAshLoad < vmin, totalAshLoad)
 
         totalAshLoad, x_out, y_out = _clip_to_window(totalAshLoad, x_out, y_out, vmin=vmin)
         return x_out, y_out, totalAshLoad
     
-    def raster_ashload(self,
-        resolution=300.0,
-        vmin=1e-3,
-        nodata=-1,
-        export_gtiff=True,
-        export_name="AshLoad.tif",
-        crs=None):
 
-        Ngrains = self.params.grains.bins
+    def raster_total_ashload(self,
+                        resolution: float=300.0, 
+                        vmin: float=1e-3, 
+                        nodata: float=-1.0, 
+                        crs: Optional[str]=None,
+    ) -> xa.Dataset:
+        """
+        Compute aggregated total ash load raster from all grain-class settling fluxes
 
-        if Ngrains==1:
-            ds = self.raster_ashload_for_grain_class(0, vmin=vmin, nodata=0.0, clipped=True)
-        else:
-            # Find largest extent, will be smallest grain size
-            # imax = np.argmax(self.params.model.xyScale)
-            imax = np.argmax(np.maximum(self.params.model.xScale, self.params.model.yScale))
+        Parameters
+        ----------
+        resolution : float, optional
+            Output grid resolution in model units (default: 300.0).
+        vmin : float, optional
+            Minimum value to keep (values below are masked/nodata, default: 1e-3).
+        nodata : float, optional
+            Value to use for nodata in output arrays (default: -1).
 
-            # Initialize with this ash load
-            ds = self.raster_ashload_for_grain_class(imax, vmin= vmin/Ngrains/10, nodata=0.0, clipped=False)
-
-            ds = ds.rio.reproject(ds.rio.crs, resolution=resolution, resampling=Resampling.cubic, nodata=0.0)
-
-            # Loop through remaining, reproject to match
-            for igrain in range(Ngrains):
-                # skip over the already used result
-                if igrain==imax:
-                    continue
-
-                ds_tmp = self.raster_ashload_for_grain_class(igrain, vmin= vmin/Ngrains/100, nodata=0.0, clipped=False)
-
-                ds_tmp = ds_tmp.rio.reproject_match(ds, nodata=0.0, resampling=Resampling.cubic)
-
-                ds += ds_tmp
-
-        ds = ds.where(ds.ash_load >= vmin, nodata)
-
+        Returns
+        -------
+                                    
+        """
+        
+        x, y, totalAshLoad = self.get_total_ashload(resolution=resolution, vmin=vmin, nodata=nodata)
+    
+        if totalAshLoad is None:
+            return None
+        
+        ds = xa.Dataset()
+        ds.coords["x"] = x + self.utm[0]
+        ds.coords["y"] = y + self.utm[1]
+        ds["ash_load"] = (("y", "x"), totalAshLoad)
         ds["ash_load"].attrs["short_name"] = "ash_load"
-        ds["ash_load"].attrs[
-            "long_name"
-        ] = "total ash load at ground level for all grain classes"
+        ds["ash_load"].attrs["long_name"] = "total ash load at ground level for all grain classes"
         ds["ash_load"].attrs["units"] = "kg/m**2"
         ds["ash_load"].rio.write_nodata(nodata, inplace=True)
-
         ds.x.attrs["units"] = "metres"
         ds.y.attrs["units"] = "metres"
-
+        ds = ds.rio.write_crs(self.utmepsg)
         if crs is not None:
             ds = ds.rio.reproject(crs, resampling=Resampling.cubic)
-
         return ds
+
+    
+    # def raster_ashload(self,
+    #     resolution=300.0,
+    #     vmin=1e-3,
+    #     nodata=-1,
+    #     export_gtiff=True,
+    #     export_name="AshLoad.tif",
+    #     crs=None):
+
+    #     Ngrains = self.params.grains.bins
+
+    #     if Ngrains==1:
+    #         ds = self.raster_ashload_for_grain_class(0, vmin=vmin, nodata=0.0, clipped=True)
+    #     else:
+    #         # Find largest extent, will be smallest grain size
+    #         # imax = np.argmax(self.params.model.xyScale)
+    #         imax = np.argmax(np.maximum(self.params.model.xScale, self.params.model.yScale))
+
+    #         # Initialize with this ash load
+    #         ds = self.raster_ashload_for_grain_class(imax, vmin= vmin/Ngrains/10, nodata=0.0, clipped=False)
+
+    #         ds = ds.rio.reproject(ds.rio.crs, resolution=resolution, resampling=Resampling.cubic, nodata=0.0)
+
+    #         # Loop through remaining, reproject to match
+    #         for igrain in range(Ngrains):
+    #             # skip over the already used result
+    #             if igrain==imax:
+    #                 continue
+
+    #             ds_tmp = self.raster_ashload_for_grain_class(igrain, vmin= vmin/Ngrains/100, nodata=0.0, clipped=False)
+
+    #             ds_tmp = ds_tmp.rio.reproject_match(ds, nodata=0.0, resampling=Resampling.cubic)
+
+    #             ds += ds_tmp
+
+    #     ds = ds.where(ds.ash_load >= vmin, nodata)
+
+    #     ds["ash_load"].attrs["short_name"] = "ash_load"
+    #     ds["ash_load"].attrs[
+    #         "long_name"
+    #     ] = "total ash load at ground level for all grain classes"
+    #     ds["ash_load"].attrs["units"] = "kg/m**2"
+    #     ds["ash_load"].rio.write_nodata(nodata, inplace=True)
+
+    #     ds.x.attrs["units"] = "metres"
+    #     ds.y.attrs["units"] = "metres"
+
+    #     if crs is not None:
+    #         ds = ds.rio.reproject(crs, resampling=Resampling.cubic)
+
+    #     return ds
 
     def contour_settling_flux(self, grain_i, logscale=True, vmin=1e-6):
 
@@ -1577,16 +2312,52 @@ class AshDisperseResult:
         export_gtiff=False,
         export_name="AshLoad.tif",
         show=True,
+        ds=None,
     ):
+        """
+        Plot total ash load as filled contours.
 
-        ds = self.raster_ashload(
-            resolution=resolution,
-            vmin=vmin / 10,
-            nodata=nodata,
-            export_gtiff=export_gtiff,
-            export_name=export_name,
-            crs=webmerc["init"]
-        )
+        Parameters
+        ----------
+        resolution : float, optional
+            Output grid resolution (default: 300.0). Ignored if ds is provided.
+        logscale : bool, optional
+            Use logarithmic color scale (default: True).
+        cmap : matplotlib colormap, optional
+            Colormap to use (default: viridis).
+        vmin : float, optional
+            Minimum value to plot (default: 1e-3).
+        nodata : float, optional
+            Value to use for nodata (default: -1).
+        alpha : float, optional
+            Alpha blending for filled contours (default: 0.5).
+        basemap : bool, optional
+            If True, add a basemap (default: False).
+        export_gtiff : bool, optional
+            If True, write a GeoTIFF (default: False).
+        export_name : str, optional
+            Filename for GeoTIFF (default: 'AshLoad.tif').
+        show : bool, optional
+            If True, show the plot (default: True).
+        ds : xarray.Dataset, optional
+            If provided, use this dataset (must have 'ash_load'). Otherwise, compute from model.
+
+        Returns
+        -------
+        fig, ax, cbar : tuple
+            Matplotlib Figure, Axes, and Colorbar objects.
+
+        Notes
+        -----
+        If ds is not provided, the function computes the total ash load using current model parameters.
+        """
+        if ds is None:
+            ds = self.compute_total_ashload(resolution=resolution, vmin=vmin/10, nodata=nodata, to_dataset=True)
+            if export_gtiff:
+                arr = ds["ash_load"].values
+                x = ds.x.values
+                y = ds.y.values
+                self.write_gtiff(arr, x, y, export_name, nodata=nodata, vmin=vmin, resolution=None)
         if ds is None:
             raise RuntimeError("No data in plot_ashload()")
 
@@ -1612,21 +2383,11 @@ class AshDisperseResult:
             tmp = cbar_ax.scatter(
                 levels, np.ones_like(levels), c=levels, cmap=cmap, norm=LogNorm()
             )
-            # CS = ax.contourf(
-            #     x,
-            #     y,
-            #     data,
-            #     levels,
-            #     locator=ticker.LogLocator(),
-            #     cmap=cmap,
-            #     origin="lower",
-            # )
         else:
             levels = lin_levels(vmin, vmax, num=20)
             tmp = cbar_ax.scatter(
                 levels, np.ones_like(levels), c=levels, cmap=cmap, norm=Normalize()
             )
-            # CS = ax.contourf(x, y, data, levels, cmap=cmap, origin="lower")
 
         fig, ax = plt.subplots()
         for j, l in enumerate(levels):
@@ -1664,7 +2425,6 @@ class AshDisperseResult:
 
         cbar = plt.colorbar(tmp, ax=ax, cax=cax)
         cbar.minorticks_off()
-        # cbar.set_ticks([levels])
         cbar.set_label("Ash load (kg/m\u00B2)")
         plt.close(cbar_fig)
 
