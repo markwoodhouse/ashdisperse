@@ -1,6 +1,8 @@
 import datetime
+import numbers
 import re
 from os.path import isfile
+from typing import Any, Callable, Type, TypeVar
 
 import pandas as pd
 from numpy import isfinite
@@ -12,20 +14,19 @@ from prompt_toolkit.validation import ValidationError, Validator
 from ashdisperse.data import get_gvp_list
 from ashdisperse.utilities import is_valid_datetime, string_to_datetime
 
+T = TypeVar("T", int, float)
 
 
-def isnotebook():
+def detect_shell_name() -> str:
     try:
-        shell = get_ipython().__class__.__name__
-        if shell == "ZMQInteractiveShell":
-            ret = True  # Jupyter notebook or qtconsole
-        elif shell == "TerminalInteractiveShell":
-            ret = False  # Terminal running IPython
-        else:
-            ret = False  # Other type (?)
-        return ret
+        ip = get_ipython()  # will NameError outside IPython
     except NameError:
-        return False  # Probably standard Python interpreter
+        return "NoIPython"
+    return ip.__class__.__name__ if ip is not None else "NoIPython"
+
+
+def isnotebook() -> bool:
+    return detect_shell_name() == "ZMQInteractiveShell"
 
 
 __ISNOTEBOOK = isnotebook()
@@ -44,7 +45,7 @@ style = Style.from_dict(
 
 gvp_list = get_gvp_list()
 
-def print_title(title_text):
+def print_title(title_text: str) -> None:
     if __ISNOTEBOOK:
         print(title_text)
     else:
@@ -53,20 +54,20 @@ def print_title(title_text):
         )
 
 
-def print_text(text):
+def print_text(text: str) -> None:
     if __ISNOTEBOOK:
         print(text)
     else:
         print_formatted_text(HTML("<text> {} </text>".format(text)), style=style)
 
 
-def print_warning(text):
+def print_warning(text: str) -> None:
     if __ISNOTEBOOK:
         print(text)
     else:
         print_formatted_text(HTML("<warning> {} </warning>".format(text)), style=style)
 
-def query_yes_no(question, default="yes"):
+def query_yes_no(question: str, default: str = "yes") -> bool:
 
     if default is None:
         ans = " [y/n] "
@@ -108,7 +109,7 @@ def query_yes_no(question, default="yes"):
             print_formatted_text(error_text, style=style)
 
 
-def query_choices(question, choices=["y", "n"], default=None):
+def query_choices(question: str, choices: list[str] = ["y", "n"], default: str | None = None) -> str:
     """Asks a question via input() with answer in choices.
 
     Args:
@@ -157,7 +158,12 @@ def query_choices(question, choices=["y", "n"], default=None):
             print_formatted_text(error_text, style=style)
 
 
-def query_change_value(question, default=None, lower=None, upper=None, answer_type=float):
+def query_change_value(question: str,
+                       default: T | None = None, 
+                       lower: T | None = None, 
+                       upper: T | None = None, 
+                       answer_type: type[T] = float) -> T:
+
     """Ask a question via input() and return their answer.
 
     "question" is a string that is presented to the user.
@@ -167,21 +173,35 @@ def query_change_value(question, default=None, lower=None, upper=None, answer_ty
 
     """
 
-    if default is not None and not isinstance(default, answer_type):
-        raise ValueError(
-            "In query_change_value, default value {}".format(default)
-            + "must be of type {}".format(answer_type)
-        )
+    if default is not None:
+        try:
+            default = answer_type(default)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"In query_change_value, default value {default}"
+                + f"must be of type {answer_type}"
+            )
     
-    if lower is not None and not isinstance(lower, answer_type):
-        raise ValueError(
-            f"In query_change_value, lower value {lower} must be of type {answer_type}"
-        )
+    if lower is not None:
+        try:
+            lower = answer_type(lower)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"In query_change_value, lower value {lower} must be of type {answer_type}"
+            )
+    
+    if upper is not None:
+        try:
+            upper = answer_type(upper)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"In query_change_value, upper value {upper} must be of type {answer_type}"
+            )
 
     if default is None:
         ans = " "
     else:
-        ans = " [return for default = {}] ".format(default)
+        ans = f" [return for default = {default}] "
 
     def is_valid_num(text):
 
@@ -189,17 +209,14 @@ def query_change_value(question, default=None, lower=None, upper=None, answer_ty
             return True
 
         try:
-            answer_type(text)
-        except ValueError:
-            return False
+            val = answer_type(text)        
+        except (ValueError, TypeError):
+                return False
 
-        val = answer_type(text)
-        if lower is not None:
-            if answer_type(text)<lower:
-                return False
-        if upper is not None:
-            if answer_type(text)>upper:
-                return False
+        if lower is not None and val<lower:
+            return False
+        if upper is not None and val>upper:
+            return False
         
         return True
 
@@ -226,14 +243,18 @@ def query_change_value(question, default=None, lower=None, upper=None, answer_ty
     while True:
         if __ISNOTEBOOK:
             choice = input(question_text)
+
         else:
             choice = prompt(question_text, style=style, validator=validator)
 
         if default is not None and choice == "":
             ret = default
+            break
         else:
             ret = answer_type(choice)
-        return ret
+            break
+
+    return ret
 
 
 def query_set_value(question, answer_type=float, lower=None, upper=None):
@@ -331,7 +352,7 @@ def is_valid_lon(lon):
     return ret
 
 
-def is_valid_latlon(latlon):
+def is_valid_latlon(latlon: str) -> tuple[float | None, float | None]:
     try:
         lat, lon = latlon.split(",", 2)
         lat = float(lat)
@@ -354,7 +375,7 @@ def has_comma(text):
     return ret
 
 
-def get_latlon_from_gvp_name(name):
+def get_latlon_from_gvp_name(name: str) -> tuple[str | None, float | None, float | None]:
     this_volc = gvp_list.loc[gvp_list.Search_Name == name]
     indx = this_volc['Primary_indx']
 
@@ -406,7 +427,7 @@ class NameLatLonValidator(Validator):
                 )
 
 
-def query_latlon():
+def query_latlon() -> tuple[str | None, float | None, float | None]:
     latlon_query_text = (
         "Enter Volcano name or give latitude and "
         + "longitude of source (as decimal degrees in format lat, lon): "
@@ -414,14 +435,14 @@ def query_latlon():
 
     if __ISNOTEBOOK:
         while True:
-            latlon = input(latlon_query_text)
-            lat, lon = is_valid_latlon(latlon)
+            latlon_input = input(latlon_query_text)
+            lat, lon = is_valid_latlon(latlon_input)
             if lat is not None and lon is not None:
                 name = None
                 break
 
-            if latlon in gvp_list.Search_Name.values:
-                name, lat, lon = get_latlon_from_gvp_name(latlon)
+            if latlon_input in gvp_list.Search_Name.values:
+                name, lat, lon = get_latlon_from_gvp_name(latlon_input)
                 break
 
             print(
@@ -434,25 +455,25 @@ def query_latlon():
             )
     else:
         latlon_query = HTML("<query> {} </query>".format(latlon_query_text))
-        name_cmplter = WordCompleter(gvp_list.Search_Name.unique())
-        latlon = prompt(
+        name_cmplter = WordCompleter(gvp_list.Search_Name.unique().tolist())
+        latlon_input = prompt(
             latlon_query,
             completer=name_cmplter,
             validator=NameLatLonValidator(),
             style=style,
         )
-        if has_comma(latlon) and latlon[0].isnumeric():
-            lat, lon = is_valid_latlon(latlon)
+        if has_comma(latlon_input) and latlon_input[0].isnumeric():
+            lat, lon = is_valid_latlon(latlon_input)
             name = None
         else:
-            name, lat, lon = get_latlon_from_gvp_name(latlon)
+            name, lat, lon = get_latlon_from_gvp_name(latlon_input)
 
     print(name, lat, lon)
 
     return name, lat, lon
 
 
-def query_met_file():
+def query_met_file() -> str:
     met_query = "Path of met file (netCDF): "
     if __ISNOTEBOOK:
         while True:
