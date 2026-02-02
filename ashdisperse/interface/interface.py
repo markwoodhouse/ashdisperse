@@ -12,7 +12,7 @@ from siphon.catalog import TDSCatalog
 from xarray.backends import NetCDF4DataStore
 
 from ..config import config
-from ..met import ERA5, NetcdfMet, load_met, met, save_met
+from ..met import ERA5, MetDataset, NetcdfMet, load_met, met, save_met
 from ..params import (EmissionParameters, GrainParameters, MetParameters,
                       ModelParameters, OutputParameters, Parameters,
                       PhysicalParameters, SolverParameters, SourceParameters,
@@ -531,7 +531,15 @@ def set_source_parameters(params_set):
         )
 
     name, lat, lon = query_latlon()
-
+    if name is None:
+        name = ""
+    
+    if lat is None:
+        raise ValueError(f"lat is not set")
+    
+    if lon is None:
+        raise ValueError(f"lon is not set")
+    
     params_set.source = SourceParameters(
         lat, lon, latlon_point_to_utm_code(lat, lon), name=name
     )
@@ -819,18 +827,48 @@ def _set_met_interface(params_set, gui=False):
 
         met_nc = _get_local_netcdf_met(met_file)
 
-        met_nc_time = met_nc.time
+        met_nc_time = met_nc.validtimes
 
-        if len(met_nc_time)>1:
-            met_datetime = query_datetime(
-               "Date and time for meteorological data (as yyyy-mm-dd hh:mm)"
-            )
-        elif len(met_nc_time)==1:
-            met_datetime = met_nc.time[0]
+        if met_nc_time is not None:
+            if len(met_nc_time)>1:
+                met_datetime = query_datetime(
+                   "Date and time for meteorological data (as yyyy-mm-dd hh:mm)."
+                   + f"Valid time range is {met_nc_time[0].astype('datetime64[m]')} -- {met_nc_time[-1].astype('datetime64[m]')}"
+                )
+            elif len(met_nc_time)==1:
+                met_datetime = str(met_nc_time[0].astype('datetime64[m]'))
         else:
-            met_datetime = datetime.datetime.today()
+            raise RuntimeError(f"Met data file {met_file} does not contain recognized time coordinate")
 
-        met_set = _extract_local_netcdf_met(met_nc, params_set.source.latitude, params_set.source.longitude, met_datetime)
+        if met_nc.latitudes is not None:
+            if (params_set.source.latitude > met_nc.latitudes.max()) or (params_set.source.latitude < met_nc.latitudes.min()):
+                print_warning(f"Source latitude not in extent of Met data {met_file}")
+                use_midpoint = query_yes_no("Should I use the mid-point of the latitudes in met data?")
+                if use_midpoint:
+                    latitude = np.mean(met_nc.latitudes)
+                else:
+                    print_warning(f"Incompatible latitude for met data.  Either change source latitude or change met data file.")
+                    return None
+            else:
+                latitude = params_set.source.latitude
+        else:
+            raise RuntimeError(f"Met data file {met_file} does not contain recognized latitude coordinates")
+
+        if met_nc.longitudes is not None:
+            if (params_set.source.longitude > met_nc.longitudes.max()) or (params_set.source.longitude < met_nc.longitudes.min()):
+                print_warning(f"Source longitude not in extent of Met data {met_file}")
+                use_midpoint = query_yes_no("Should I use the mid-point of the longitudes in met data?")
+                if use_midpoint:
+                    longitude = np.mean(met_nc.longitudes)
+                else:
+                    print_warning(f"Incompatible longitude for met data.  Either change source longitude or change met data file.")
+                    return None
+            else:
+                longitude = params_set.source.longitude
+        else:
+            raise RuntimeError(f"Met data file {met_file} does not contain recognized longitude coordinates")
+
+        met_set = _extract_local_netcdf_met(met_nc, latitude, longitude, met_datetime)
 
     elif met_source == 1:
         met_file = query_change_value(
@@ -881,13 +919,17 @@ def _set_met_interface(params_set, gui=False):
 def _get_local_netcdf_met(met_file):
     if not os.path.isfile(met_file):
         raise OSError("Met file {} does not exist".format(met_file))
-    nc_data = NetcdfMet(met_file)
+    nc_data = NetcdfMet.load(met_file)
     return nc_data
 
+def _get_local_netcdf_met_validtimes(nc_data: NetcdfMet) -> np.ndarray[np.datetime64]:
+    return nc_data.dataset.valid_time.values
+
+
 def _extract_local_netcdf_met(nc_data, latitude, longitude, met_datetime):
-    nc_data.extract(lat=latitude, lon=longitude, datetime=met_datetime)
+    profile = nc_data.extract(lat=latitude, lon=longitude, time=met_datetime)
     met_set = met.MetData()
-    met_set = met.netCDF_to_Met(met_set, nc_data)
+    met_set = met.MetProfile_to_Met(met_set, profile)
     return met_set
 
 

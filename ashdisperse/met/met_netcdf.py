@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import os
 import shutil
@@ -10,9 +12,8 @@ from typing import Literal, Optional
 
 import cdsapi
 import metpy.calc as metcalc
-import netCDF4
 import numpy as np
-import requests
+import pandas as pd
 import xarray as xr
 from netCDF4 import Dataset
 from siphon.catalog import TDSCatalog
@@ -66,6 +67,28 @@ class MetDataset:
         self.path = Path(file)
         self.type = type
         self._ds: Optional[xr.Dataset] = None
+
+
+    @classmethod
+    def from_file(cls, file: str) -> MetDataset:
+        nc = Dataset(file, mode='r')
+        nc_attrs = nc.ncattrs()
+        if "Originating_or_generating_Center" in nc_attrs:
+            data_source = nc.getncattr('Originating_or_generating_Center')
+        elif "GRIB_centre" in nc_attrs:
+            data_source = nc.getncattr('GRIB_centre')
+        else:
+            data_source = 'unknown'
+
+        if "ecmf" in data_source:
+            return MetDataset(file, type='ERA5')
+        elif "NCEP" in data_source:
+            if nc.getncattr('Type_of_generating_process') == 'Forcast':
+                return MetDataset(file, type="GFSForecast")
+        else:
+            return MetDataset(file)
+
+
 
     @property
     def ds(self) -> xr.Dataset:
@@ -146,7 +169,7 @@ class MetDataset:
         return self.ds.longitude.values
 
     @property
-    def time(self) -> np.ndarray:
+    def time(self) -> np.ndarray[np.datetime64]:
         """
         Return time coordinate values.
 
@@ -403,8 +426,28 @@ class NetcdfMet:
             file (str): Path to the NetCDF file.
         """
         self.file = Path(file)
-        self.dataset: Optional[MetDataset] = None
+        self._dataset: Optional[MetDataset] = None
         self.profile: Optional[MetProfile] = None
+
+    @property
+    def dataset(self) -> None | xr.Dataset:
+        return self._dataset.ds
+
+
+    @property
+    def validtimes(self) -> None | np.ndarray[np.datetime64]:
+        return self._dataset.time
+    
+
+    @property
+    def latitudes(self) -> np.ndarray | None:
+        return self._dataset.latitude
+    
+    
+    @property
+    def longitudes(self) -> np.ndarray | None:
+        return self._dataset.longitude
+
 
     # -------- Download --------
     def download(
@@ -465,15 +508,18 @@ class NetcdfMet:
         self._download_custom(lat=lat, lon=lon, extent=extent, datetimes=times, quiet=quiet, **kwargs)
 
         # Set dataset with type from subclass
-        self.dataset = MetDataset(str(self.file), type=self._kind)
+        self._dataset = MetDataset(str(self.file), type=self._kind)
 
     
     # -------- Load --------
-    def load(self):
+    @classmethod
+    def load(cls, file: str) -> NetcdfMet:
         """
-        Load the dataset from file into a MetDataset wrapper.
+        Load the dataset from file into a NetcdfMet.
         """
-        self.dataset = MetDataset(str(self.file), type=self._kind)
+        nc = NetcdfMet(file)
+        nc._dataset = MetDataset.from_file(file)
+        return nc
 
 
     def _download_custom(self, **kwargs) -> None:
@@ -519,10 +565,10 @@ class NetcdfMet:
         Raises:
             KeyError: If required variables are missing in the dataset.
         """
-        if self.dataset is None:
-            self.dataset = MetDataset(str(self.file), type=self._kind)
+        if self._dataset is None:
+            self._dataset = MetDataset(str(self.file), type=self._kind)
 
-        ds = self.dataset.ds
+        ds = self._dataset.ds
 
         # --- Compute profile ---
         extractor = MetProfileExtractor(ds)
