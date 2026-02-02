@@ -3,7 +3,7 @@ from importlib import resources
 
 
 def run_notebook(file):
-    subprocess.Popen(["jupyter notebook " + file], shell=True)
+    subprocess.run(["jupyter", "notebook", file.as_posix()])
 
 
 def launch_jupyter_example():
