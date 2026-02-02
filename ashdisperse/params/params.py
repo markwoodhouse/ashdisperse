@@ -38,6 +38,15 @@ param_spec["output"] = optional(OutputParameters_type)
 
 @jitclass(param_spec)
 class Parameters:
+    source: SourceParameters | None
+    grains: GrainParameters | None
+    emission: EmissionParameters | None
+    solver: SolverParameters | None
+    physical: PhysicalParameters | None
+    met: MetParameters | None
+    model: ModelParameters | None
+    output: OutputParameters | None
+
     def __init__(self):
         self.source = None
         self.grains = None
@@ -391,7 +400,7 @@ def load_parameters(file):
 
     return params
 
-def parameters_from_dict(paramset: dict) -> Parameters_type:
+def parameters_from_dict(paramset: dict) -> Parameters:
 
     params = Parameters()
 

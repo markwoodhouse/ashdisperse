@@ -113,7 +113,7 @@ class EmissionParameters:
         self.profile = List.empty_list(np.int64)
         self.Suzuki_k = List.empty_list(np.float64)
 
-    def add_profile(self, lower, upper, profile, Suzuki_k):
+    def add_profile(self, lower: float, upper: float, profile: int, Suzuki_k: float):
         """Add a emission class to the EmissionParameters object.
 
         An emission profile requires a lower altitude and a Suzuki k parameter.

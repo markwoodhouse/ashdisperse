@@ -22,14 +22,14 @@ source_spec["name"] = unicode_type  # name of source
 @jitclass(source_spec)
 class SourceParameters:
     def __init__(self,
-                 latitude:np.float64=np.nan,
-                 longitude:np.float64=np.nan,
-                 utmcode:int=0,
-                 radius:np.float64=np.nan,
-                 PlumeHeight:np.float64=np.nan,
-                 MER:np.float64=np.nan,
-                 duration:np.float64=np.nan,
-                 name:str=""):
+                 latitude: np.float64 = np.float64(np.nan),
+                 longitude: np.float64 = np.float64(np.nan),
+                 utmcode: int = 0,
+                 radius: np.float64 = np.float64(np.nan),
+                 PlumeHeight: np.float64 = np.float64(np.nan),
+                 MER: np.float64 = np.float64(np.nan),
+                 duration: np.float64 = np.float64(np.nan),
+                 name: str = ""):
         self.latitude = latitude
         self.longitude = longitude
         self.utmcode = utmcode
