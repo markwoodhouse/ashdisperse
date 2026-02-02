@@ -1,30 +1,44 @@
 from __future__ import annotations
+
 import os
 import warnings
 from math import ceil, floor
-from typing import Self, Optional, TypeAlias
+from typing import Any, LiteralString, Optional, Self, TypeAlias, cast
 
-import branca.colormap as cm
+import branca.colormap as branca_cm
 import folium
 import geopandas as gpd
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from pyproj import Transformer
 import rasterio as rio
-import rioxarray as rxa
+import rasterio.transform as rio_transform
+import rioxarray
 import utm
 import xarray as xa
-from matplotlib import ticker
-from matplotlib.colors import LogNorm, Normalize
+from branca.colormap import LinearColormap as branca_LinearColormap
+from branca.colormap import StepColormap as branca_StepColormap
+from branca.colormap import linear as branca_linear
+from folium import features as folium_features
+from matplotlib import cm, ticker
+from matplotlib.axes import Axes
+from matplotlib.colorbar import Colorbar
+from matplotlib.colors import (BoundaryNorm, Colormap, ListedColormap, LogNorm,
+                               Normalize)
+from matplotlib.figure import Figure
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from numpy.typing import NDArray
 from pandas import concat
+from pyproj import Transformer
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 from rasterio.windows import get_data_window
 from scipy.fft import ifft2, irfft2
 from scipy.interpolate import RectBivariateSpline, interp1d
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
+from shapely.geometry.base import BaseGeometry
 from skimage.measure import find_contours, marching_cubes
+from xarray.core.types import InterpOptions
 
 from ashdisperse.params import Parameters
 from ashdisperse.params.emission_params import EmissionParameters
@@ -46,19 +60,17 @@ from ..mapping import (BindColormap, add_north_arrow, add_opentopo_basemap,
 from ..utilities import (lin_levels, log_levels, log_steps, nice_round_down,
                          nice_round_up, pad_window, plot_rowscols)
 
-Point: TypeAlias = tuple[float, float]
-PointList: TypeAlias = list[Point]
 
-def compat_warning(message: str, category: str, filename:str, lineno, file=None, line=None) -> str:
-    return f"{category.__name__}: {message}"
+def compat_warning(message: str, category: type[Warning], filename:str, lineno, file=None, line=None) -> str:
+    return f"{str(category.__name__)}: {message}"
 
 def _clip_to_window(
-        raster: np.ndarray, 
-        x: np.ndarray, 
-        y: np.ndarray, 
+        raster: NDArray[np.float64], 
+        x: NDArray[np.float64], 
+        y: NDArray[np.float64], 
         vmin: float, 
         pad: int=1
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """
     Clip a raster to values >= vmin
 
@@ -100,14 +112,14 @@ def _clip_to_window(
 
 
 def _interpolate(
-        raster: np.ndarray, 
-        x: np.ndarray, 
-        y: np.ndarray, 
+        raster: NDArray[np.float64], 
+        x: NDArray[np.float64], 
+        y: NDArray[np.float64], 
         resolution: float, 
         extent: Optional[list[float]]=None, 
         vmin: float=1e-6,
         nodata: float=-1, 
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """
     Interpolate a raster to different grid resolution
 
@@ -135,7 +147,6 @@ def _interpolate(
         (x_out, y_out, raster_out)
         The interpolated raster (raster_out) and new coordinates (x_out, y_out) as arrays.
     """
-
 
     if extent is not None:
         min_x = extent[0]
@@ -172,16 +183,15 @@ def _interpolate(
     return x_out, y_out, raster_out
 
 
-
 def _sample_point_from_dataset(
     ds: xa.Dataset,
-    target_crs: rio.crs.CRS,
-    latlon: Optional[Point | PointList] = None,
-    xy: Optional[Point | PointList] = None,
+    target_crs: rio.CRS,
+    latlon: Optional[tuple[float, float] | list[tuple[float, float]]] = None,
+    xy: Optional[tuple[float, float] | list[tuple[float, float]]] = None,
     var: str = "ash_load",
     fallback: float = 0.0,
-    method: str = "linear",
-) -> float | np.ndarray:
+    method: InterpOptions = "linear",
+) -> float | NDArray[np.float64]:
     """
     Sample one or more points from an xarray Dataset using projected or geographic coordinates.
 
@@ -211,7 +221,7 @@ def _sample_point_from_dataset(
         Name of the variable in `ds` to sample. Default is `"ash_load"`.
     fallback : float, optional
         Value returned when sampling fails, variable is missing, or no valid data exists. Default is `0.0`.
-    method : str, optional
+    method : xarray.core.types.InterpOptions, optional
         Interpolation method passed to `xarray.DataArray.interp`. Common options: `"linear"`, `"nearest"`.
         Default is `"linear"`.
 
@@ -258,9 +268,9 @@ def _sample_point_from_dataset(
         transformer = Transformer.from_crs("EPSG:4326", target_crs, always_xy=True)
 
         if isinstance(latlon, list):
-            latlon = np.asarray(latlon)
-            lat = latlon[:,0] # type: ignore
-            lon = latlon[:,1] # type: ignore
+            latlon_arr = np.asarray(latlon)
+            lat = latlon_arr[:,0]
+            lon = latlon_arr[:,1]
         else:
             lat = latlon[0]
             lon = latlon[1]
@@ -303,27 +313,30 @@ def _sample_point_from_dataset(
 class AshDisperseResult:
     """Results of an AshDisperse simulation"""
     params: Parameters
-    utm: tuple[float,float,int,str]
+    utm: tuple[Any | float, Any | float, Any | int,  Any | LiteralString | None]
     utmepsg: int
-    C0_FT: np.ndarray
-    Cz_FT: np.ndarray
-    x_dimless: np.ndarray
-    y_dimless: np.ndarray
-    kx: np.ndarray
-    ky: np.ndarray
-    C0_dimless: np.ndarray
-    Cz_dimless: np.ndarray
-    C0: np.ndarray
-    Cz: np.ndarray
-    SettlingFlux: np.ndarray
-    x: np.ndarray
-    y: np.ndarray
+    C0_FT: NDArray[np.complex128]
+    Cz_FT: NDArray[np.complex128]
+    x_dimless: NDArray[np.float64]
+    y_dimless: NDArray[np.float64]
+    kx: NDArray[np.float64]
+    ky: NDArray[np.float64]
+    C0_dimless: NDArray[np.float64]
+    Cz_dimless: NDArray[np.float64]
+    C0: NDArray[np.float64]
+    Cz: NDArray[np.float64]
+    SettlingFlux: NDArray[np.float64]
+    x: NDArray[np.float64]
+    y: NDArray[np.float64]
     
     _interpolated: bool
 
     def __init__(
-            self, params: Parameters, C0_FT: np.ndarray, Cz_FT: np.ndarray
-        ):
+            self, 
+            params: Parameters, 
+            C0_FT: NDArray[np.complex128], 
+            Cz_FT: NDArray[np.complex128]
+        ) -> None:
         """
         Create a AshDisperseResult instance from parameters and arrays of Fourier coefficients
 
@@ -403,6 +416,11 @@ class AshDisperseResult:
             )
 
 
+    @classmethod
+    def create(cls, params, C0_FT, Cz_FT) -> Self:
+        return cls(params, C0_FT, Cz_FT)
+
+
     @property
     def grain_classes(self) -> int:
         """
@@ -415,6 +433,7 @@ class AshDisperseResult:
         """
         return self.params.grains.bins
     
+
     @property
     def interpolated(self) -> bool:
         """
@@ -428,6 +447,7 @@ class AshDisperseResult:
         """
         return self._interpolated
 
+
     @property
     def source_marker(self) -> gpd.GeoDataFrame:
         """
@@ -439,12 +459,13 @@ class AshDisperseResult:
             GeoDataFrame containing the source location in WGS84 coordinates
         """
 
-        df = pd.DataFrame(columns=["Name", "Latitude", "Longitude"])
-        df.loc[0] = [
-            self.params.source.name,
-            self.params.source.latitude,
-            self.params.source.longitude,
-        ]
+        df = pd.DataFrame(
+            {
+                "Name":[self.params.source.name], 
+                "Latitude":[self.params.source.latitude], 
+                "Longitude":[self.params.source.longitude], 
+            }
+        )
         source_marker = gpd.GeoDataFrame(
             df,
             geometry=gpd.points_from_xy(df.Longitude, df.Latitude),
@@ -453,7 +474,11 @@ class AshDisperseResult:
         return source_marker
 
 
-    def linear_interp(self, Nx_log2: int, Ny_log2: int) -> AshDisperseResult:
+    def linear_interp(
+            self, 
+            Nx_log2: int, 
+            Ny_log2: int
+        ) -> AshDisperseResult:
         """
         Return a new AshDisperseResult with bilinear interpolation by zero-padding the FFTs.
 
@@ -508,7 +533,7 @@ class AshDisperseResult:
         params.solver.Nx_log2 = Nx_log2
         params.solver.Ny_log2 = Ny_log2
 
-        r = AshDisperseResult(params, C0_FT, Cz_FT)
+        r = AshDisperseResult.create(params, C0_FT, Cz_FT)
         r._interpolated = True
 
         return r
@@ -554,7 +579,8 @@ class AshDisperseResult:
             params.model.xScale,
             params.model.yScale
         )
-        return AshDisperseResult(params, self.C0_FT, self.Cz_FT)
+        return AshDisperseResult.create(params, self.C0_FT, self.Cz_FT)
+
 
     def change_duration(self, duration: float) -> AshDisperseResult:
         """
@@ -590,7 +616,8 @@ class AshDisperseResult:
 
         params = copy_parameters(self.params)
         params.source.duration = duration
-        return AshDisperseResult(params, self.C0_FT, self.Cz_FT)
+        return AshDisperseResult.create(params, self.C0_FT, self.Cz_FT)
+
 
     def change_grain_proportions(self, props: list[float]) -> AshDisperseResult:
         """
@@ -643,7 +670,7 @@ class AshDisperseResult:
             params.model.xScale,
             params.model.yScale
         )
-        return AshDisperseResult(params, self.C0_FT, self.Cz_FT)
+        return AshDisperseResult.create(params, self.C0_FT, self.Cz_FT)
 
 
     @classmethod
@@ -817,10 +844,14 @@ class AshDisperseResult:
         C0_FT = da.C0_FT_r.values + 1j*da.C0_FT_i.values
         Cz_FT = da.Cz_FT_r.values + 1j*da.Cz_FT_i.values
 
-        return AshDisperseResult(p, C0_FT, Cz_FT)
+        return AshDisperseResult.create(p, C0_FT, Cz_FT)
 
     
-    def to_netcdf(self, filename: str = "AshDisperse.nc", compress: bool = True, complevel: int = 5) -> None:
+    def to_netcdf(
+            self, 
+            filename: str = "AshDisperse.nc", 
+            compress: bool = True, 
+            complevel: int = 5) -> None:
         """
         Save the current :class:`AshDisperseResult` to a NetCDF file.
 
@@ -1009,7 +1040,7 @@ class AshDisperseResult:
         vmin: float = 1e-9,
         masked: bool = False,
         clipped: bool = True
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]] | None:
         """
         Retrieve the ground-level concentration grid for a specific grain size class.
 
@@ -1086,14 +1117,13 @@ class AshDisperseResult:
         return x, y, conc
 
 
-
     def get_settlingflux_for_grain_class(
         self,
         grain_i: int,
         vmin: float = 1e-7,
         masked: bool = False,
         clipped: bool = True
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]] | None:
         """
         Retrieve the ground-level settling flux (mass flux to surface) for a specific grain size class.
 
@@ -1166,7 +1196,6 @@ class AshDisperseResult:
 
         return x, y, flux
 
-
     
     def get_ashload_for_grain_class(
         self,
@@ -1174,7 +1203,7 @@ class AshDisperseResult:
         vmin: float = 1e-5,
         masked: bool = False,
         clipped: bool = True
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]] | None:
         """
         Retrieve the ground-level ash load grid for a specific grain size class.
 
@@ -1258,19 +1287,94 @@ class AshDisperseResult:
 
 
     def POI_ashload_for_grain_class(
-        self, grain_i: int, latlon: Point | PointList, vmin: float = 1e-3
-    ) -> float | np.ndarray:
+        self, 
+        grain_i: int, 
+        latlon: tuple[float, float] | list[tuple[float, float]], 
+        vmin: float = 1e-5
+    ) -> float | NDArray[np.float64] | None:
+        """
+        Retrieve the ground-level ash load at a points-of-interest for a specific grain class
+
+        Ash load represents the total deposited mass per unit area (kg/m²) for the
+        specified grain class, computed as:
+
+        ``ashload = settling_flux * eruption_duration``
+
+        Parameters
+        ----------
+        grain_i : int
+            Zero-based index of the grain size class to extract.
+        latlon : tuple[float, float] | list[tuple[float, float]]
+            Point- or points-of-interest.
+            A single point is passed as a tuple as (latitude, longitude).
+            Multiple points-of-interest are passed as a list of single points.
+            
+        vmin : float, optional
+            Minimum ash load threshold (kg/m²). Values below this threshold are treated
+            as absent. Default is ``1e-5``.
+
+        Returns
+        -------
+        float | NDArray[np.float64] | None
+            If valid data exists, returns:
+            - a float if latlon is a single point
+            - a 1D ndarray of floats if latlon is a list of points
+            If no valid data exists (e.g., all values below ``vmin``), returns ``None``.
+        """
         self._check_valid_grain(grain_i)
         ds = self.raster_ashload_for_grain_class(
             grain_i, vmin=vmin, nodata=np.nan, masked=False, crs=None
         )
 
-        return _sample_point_from_dataset(ds, ds.rio.crs, latlon=latlon, var="ash_load", fallback=0)
+        if ds is None:
+            return None
+        else:
+            return _sample_point_from_dataset(ds, ds.rio.crs, latlon=latlon, var="ash_load", fallback=0)
 
-    def POI_ashload(self, latlon: Point | PointList, vmin: float = 1e-3) -> tuple[float, list[dict[str, float|np.ndarray]]]:
+    def POI_ashload(
+            self, 
+            latlon: tuple[float, float] | list[tuple[float, float]], 
+            vmin: float = 1e-5
+    ) -> tuple[float | NDArray[np.float64], list[dict[str, float | NDArray[np.float64] | None]]]:
+        """
+        Retrieve the ground-level ash load at a points-of-interest, aggregated over all grain classes.
 
-        loads = []
-        total_load = 0
+        Ash load represents the total deposited mass per unit area (kg/m²) summed over all
+        grain class, computed as:
+
+        ``ashload = sum (settling_flux_igrain) * eruption_duration``
+
+        Parameters
+        ----------
+        latlon : tuple[float, float] | list[tuple[float, float]]
+            Point- or points-of-interest.
+            A single point is passed as a tuple as (latitude, longitude).
+            Multiple points-of-interest are passed as a list of single points.
+            
+        vmin : float, optional
+            Minimum ash load threshold (kg/m²). Values below this threshold are treated
+            as absent. Default is ``1e-5``.
+
+        Returns
+        -------
+        tuple[float | NDArray[np.float64], list[dict[str, float | NDArray[np.float64] | None]]]
+            If valid data exists, returns a tuple ``(total_load, load_by_grain)``:
+            - ``total_load``: the cummulative ash load, returned as either:
+                - float if latlon is a single point
+                - list[float] if latlon is a list of points
+                If no valid data is found, the total load is zero.
+            - ``load_by_grain``: the loads for each grain class, returned as dict containing:
+                - ``diameter``: the grain diameter
+                - ``density``: the grain density
+                - ``proportion``: the grain proportion
+                - ``load``: the grain load, returned as
+                    - float if latlon is a single point
+                    - list[float] if latlon is a list of points
+                    - None if no valid data is found
+        """
+
+        loads: list[dict[str, float | NDArray[np.float64] | None]] = []
+        total_load = 0.0
         for j in range(self.grain_classes):
             this_ashload = self.POI_ashload_for_grain_class(j, latlon, vmin)
             loads.append(
@@ -1281,21 +1385,28 @@ class AshDisperseResult:
                     "load": this_ashload,
                 }
             )
-            total_load += this_ashload
+            if this_ashload is not None:
+                total_load += this_ashload
 
         return total_load, loads
 
     def POI_groundconc_for_grain_class(
-        self, grain_i: int, latlon: Point | PointList, vmin: float = 1e-3
-    ):
+        self, 
+        grain_i: int, 
+        latlon: tuple[float, float] | list[tuple[float, float]], 
+        vmin: float = 1e-3
+    ) -> float | NDArray[np.float64] | None:
         self._check_valid_grain(grain_i)
         ds = self.raster_groundconc_for_grain_class(
             grain_i, vmin=vmin, nodata=np.nan, masked=False, crs=None
         )
 
-        return _sample_point_from_dataset(ds, ds.rio.crs, latlon=latlon, var="ground_concentration", fallback=0)
+        if ds is None:
+            return None
+        else:
+            return _sample_point_from_dataset(ds, ds.rio.crs, latlon=latlon, var="ground_concentration", fallback=0)
 
-    def POI_groundconc(self, latlon: Point | PointList, vmin: float = 1e-3):
+    def POI_groundconc(self, latlon: tuple[float, float] | list[tuple[float, float]], vmin: float = 1e-3) -> tuple[float | NDArray[np.float64], list[dict[str, float|NDArray[np.float64]]]]:
 
         concs = []
         total_conc = 0
@@ -1309,21 +1420,24 @@ class AshDisperseResult:
                     "ground_concentration": this_conc,
                 }
             )
-            total_conc += this_conc
+            if this_conc is not None:
+                total_conc += this_conc
 
         return total_conc, concs
     
     def POI_settlingflux_for_grain_class(
-        self, grain_i: int, latlon: Point | PointList, vmin: float = 1e-3
-    ):
+        self, grain_i: int, latlon: tuple[float, float] | list[tuple[float, float]], vmin: float = 1e-3
+    ) -> float | NDArray[np.float64] | None:
         self._check_valid_grain(grain_i)
         ds = self.raster_settlingflux_for_grain_class(
             grain_i, vmin=vmin, nodata=np.nan, masked=False, crs=None
         )
+        if ds is None:
+            return None
+        else:
+            return _sample_point_from_dataset(ds, ds.rio.crs, latlon=latlon, var="settling_flux", fallback=0)
 
-        return _sample_point_from_dataset(ds, ds.rio.crs, latlon=latlon, var="settling_flux", fallback=0)
-
-    def POI_settlingflux(self, latlon: Point | PointList, vmin: float = 1e-3):
+    def POI_settlingflux(self, latlon: tuple[float, float] | list[tuple[float, float]], vmin: float = 1e-3) -> tuple[float | NDArray[np.float64], list[dict[str, float|NDArray[np.float64]]]]:
 
         fluxes = []
         total_flux = 0
@@ -1337,26 +1451,27 @@ class AshDisperseResult:
                     "settling_flux": this_flux,
                 }
             )
-            total_flux += this_flux
+            if this_flux is not None:
+                total_flux += this_flux
 
         return total_flux, fluxes
 
-    def max_ashload_for_grain_class(self, grain_i: int):
+    def max_ashload_for_grain_class(self, grain_i: int) -> float:
         self._check_valid_grain(grain_i)
         return np.nanmax(self.SettlingFlux[:, :, grain_i]) * self.params.source.duration
 
     def _array_to_dataset(
         self,
         name: str,
-        x: np.ndarray,
-        y: np.ndarray,
-        arr: np.ndarray | None,
+        x: NDArray[np.float64],
+        y: NDArray[np.float64],
+        arr:NDArray[np.float64] | None,
         units: str,
         short_name: Optional[str]=None,
         long_name: Optional[str]=None,
         nodata: Optional[float]=np.nan,
         crs: Optional[str]=None,
-    ) -> xa.Dataset:
+    ) -> xa.Dataset | None:
         """Helper: wrap x/y/array into an xarray.Dataset with rio metadata.
 
         Returns None if `arr` is None.
@@ -1389,13 +1504,13 @@ class AshDisperseResult:
 
     def raster_groundconc_for_grain_class(
         self, grain_i: int, vmin: float=1e-9, nodata: float=np.nan, masked: bool=False, clipped: bool=True, crs: Optional[str]=None
-    ) -> xa.Dataset:
+    ) -> xa.Dataset | None:
         data = self.get_groundconc_for_grain_class(grain_i, vmin=vmin, masked=masked, clipped=clipped)
         if data is None:
             return None
         x, y, conc = data
 
-        return self._array_to_dataset(
+        ds = self._array_to_dataset(
             name="ground_concentration",
             x=x,
             y=y,
@@ -1409,16 +1524,18 @@ class AshDisperseResult:
             crs=crs,
         )
 
+        return ds
+
 
     def raster_settlingflux_for_grain_class(
         self, grain_i: int, vmin: float=1e-6, nodata: float=np.nan, masked: bool=False, clipped: bool=True, crs: Optional[str]=None
-    ) -> xa.Dataset:
+    ) -> xa.Dataset | None:
         data = self.get_settlingflux_for_grain_class(grain_i, vmin=vmin, masked=masked, clipped=clipped)
         if data is None:
             return None
         x, y, flux = data
 
-        return self._array_to_dataset(
+        ds = self._array_to_dataset(
             name="settling_flux",
             x=x,
             y=y,
@@ -1432,10 +1549,12 @@ class AshDisperseResult:
             crs=crs,
         )
 
+        return ds
+
 
     def raster_ashload_for_grain_class(
         self, grain_i: int, vmin: float=1e-2, nodata: float=np.nan, masked: bool=False, clipped: bool=True, crs: Optional[str]=None
-    ) -> xa.Dataset:
+    ) -> xa.Dataset | None:
         data = self.get_ashload_for_grain_class(
             grain_i, vmin=vmin, masked=masked, clipped=clipped,
         )
@@ -1443,7 +1562,7 @@ class AshDisperseResult:
             return None
         x, y, ashload = data
 
-        return self._array_to_dataset(
+        ds = self._array_to_dataset(
             name="ash_load",
             x=x,
             y=y,
@@ -1456,6 +1575,8 @@ class AshDisperseResult:
             nodata=nodata,
             crs=crs,
         )
+
+        return ds
     
 
     # def _raster_contour(self, raster, name, cntrs):
@@ -1520,8 +1641,14 @@ class AshDisperseResult:
 
     #     return g
 
-    def write_gtiff(self, raster: np.ndarray, x: np.ndarray, y: np.ndarray, outname: str, 
-                    nodata: float=-1, vmin: float=1e-6, resolution: Optional[float]=None) -> None:
+    def write_gtiff(self,
+                    raster: NDArray[np.float64], 
+                    x: NDArray[np.float64], 
+                    y: NDArray[np.float64], 
+                    outname: str, 
+                    nodata: float = -1, 
+                    vmin: float = 1e-6, 
+                    resolution: float | None = None) -> None:
 
         print("Writing data to {outname}".format(outname=outname))
         if os.path.isfile(outname):
@@ -1540,7 +1667,7 @@ class AshDisperseResult:
         height, width = raster.shape
         raster[raster < vmin] = nodata
 
-        transform = rio.transform.from_bounds(
+        transform = rio_transform.from_bounds(
             x[0] + self.utm[0],
             y[0] + self.utm[1],
             x[-1] + self.utm[0],
@@ -1567,7 +1694,11 @@ class AshDisperseResult:
 
 
     def write_settling_flux_for_grain_class(
-        self, grain_i: int, nodata: float=-1.0, vmin: float=1e-6, resolution: Optional[float]=None,
+        self,
+        grain_i: int, 
+        nodata: float = -1.0, 
+        vmin: float = 1e-6, 
+        resolution: float | None = None,
     ) -> None:
         self._check_valid_grain(grain_i)
         self.write_gtiff(
@@ -1582,11 +1713,19 @@ class AshDisperseResult:
 
 
     def write_ashload_for_grain_class(
-        self, grain_i: int, vmin: float=1e-3, resolution: Optional[float]=None, outname: Optional[str]=None, compress: str='LZW',
+        self,
+        grain_i: int, 
+        vmin: float = 1e-3, 
+        resolution: float | None = None, 
+        outname: str | None = None, 
+        compress: str='LZW',
     ) -> None:
         self._check_valid_grain(grain_i)
 
         ashload = self.raster_ashload_for_grain_class(grain_i, vmin=vmin, masked=False)
+        if ashload is None:
+            warnings.warn(f"No ashload found above {vmin}.  Nothing will be saved")
+            return
 
         res_x, res_y = ashload.rio.resolution()
         height = ashload.rio.height
@@ -1615,10 +1754,10 @@ class AshDisperseResult:
 
     def get_ashload(
         self,
-        resolution: float=300.0,
-        vmin: float=1e-3,
-        nodata: float=-1.0,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        resolution: float = 300.0,
+        vmin: float = 1e-3,
+        nodata: float = -1.0,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
         # Delegate numeric aggregation to compute_total_ashload
         x_out, y_out, totalAshLoad = self.get_total_ashload(
             resolution=resolution, vmin=vmin, nodata=nodata
@@ -1627,10 +1766,10 @@ class AshDisperseResult:
         return x_out, y_out, totalAshLoad
 
     def get_total_ashload(self, 
-                        resolution: float=300.0, 
-                        vmin: float=1e-3, 
-                        nodata: float=-1.0, 
-                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                        resolution: float = 300.0, 
+                        vmin: float = 1e-3, 
+                        nodata: float = -1.0, 
+                        ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
         """
         Compute aggregated total ash load raster from all grain-class settling fluxes.
 
@@ -1726,7 +1865,7 @@ class AshDisperseResult:
                         vmin: float=1e-3, 
                         nodata: float=-1.0, 
                         crs: Optional[str]=None,
-    ) -> xa.Dataset:
+    ) -> xa.Dataset | None:
         """
         Compute aggregated total ash load raster from all grain-class settling fluxes
 
@@ -1853,48 +1992,60 @@ class AshDisperseResult:
                         if jj == 0:
                             geom = this_poly
                             g_tmp = gpd.GeoDataFrame(
-                                columns=["SettlingFlux", "GrainSize", "geometry"],
+                                {
+                                    "SettlingFlux": [level],
+                                    "GrainClass": [grain_i],
+                                    "GrainSize": [self.params.grains.diameter[grain_i]],
+                                },
+                                geometry = [geom],
                                 crs=self.params.source.utmcode,
                             )
-                            g_tmp.loc[0, "GrainClass"] = grain_i
-                            g_tmp.loc[0, "GrainSize"] = self.params.grains.diameter[
-                                grain_i
-                            ]
-                            g_tmp.loc[0, "SettlingFlux"] = level
-                            g_tmp.loc[0, "geometry"] = geom
                         else:
-                            if g_tmp.loc[0, "geometry"].contains(this_poly):
-                                geom = g_tmp.loc[0, "geometry"].difference(this_poly)
+                            current_geom = cast(BaseGeometry, g_tmp.geometry.iloc[0])
+                            if current_geom.contains(this_poly):
+                                geom = current_geom.difference(this_poly)
                             else:
-                                geom = g_tmp.loc[0, "geometry"].union(this_poly)
-                            g_tmp.loc[[0], "geometry"] = gpd.GeoSeries([geom])
+                                geom = current_geom.union(this_poly)
+                            g_tmp.set_geometry(gpd.GeoSeries([geom], crs=g_tmp.crs), inplace=True)
 
             if g is None:
                 g = gpd.GeoDataFrame(g_tmp).set_geometry("geometry")
             else:
                 g = gpd.GeoDataFrame(concat([g, g_tmp], ignore_index=True))
 
-        g["SettlingFlux"] = g["SettlingFlux"].astype("float64")
-        g["GrainClass"] = g["GrainClass"].astype("int64")
+        if g is not None:
+            g["SettlingFlux"] = g["SettlingFlux"].astype("float64")
+            g["GrainClass"] = g["GrainClass"].astype("int64")
+        else:
+            # Handle the "no geometry produced" case
+            g = gpd.GeoDataFrame(
+                columns=["SettlingFlux", "GrainClass", "GrainSize", "geometry"],
+                geometry="geometry",
+                crs=self.params.source.utmcode)
+
         return g
 
     def plot_settling_flux_for_grain_class(
         self,
-        grain_i,
-        logscale=True,
-        vmin=1e-6,
-        vmax=None,
-        cmap=plt.cm.Purples,
-        basemap=True,
-        alpha=0.5,
-        max_zoom=None,
-        show=True,
-        save=False,
-        save_name="ashdisperse_result.png",
-        min_ax_width=None,
-        min_ax_height=None,
-    ):
+        grain_i: int,
+        logscale: bool = True,
+        vmin: float = 1e-6,
+        vmax: float | None =None,
+        cmap: str | Colormap = "Purples",
+        basemap: bool = True,
+        alpha: float = 0.5,
+        max_zoom: int | None = None,
+        show: bool = True,
+        save: bool = False,
+        save_name: str = "ashdisperse_result.png",
+        min_ax_width: float | None = None,
+        min_ax_height: float | None = None,
+    ) -> tuple[Figure, Axes, Colorbar]:
+        
         self._check_valid_grain(grain_i)
+
+        if isinstance(cmap, str):
+            cmap = plt.get_cmap(cmap)
 
         ds = self.raster_settlingflux_for_grain_class(
             grain_i, vmin=vmin, crs=webmerc["init"]
@@ -1912,17 +2063,11 @@ class AshDisperseResult:
         if vmax is None:
             maxflux = np.nanmax(data)
             mag = np.log10(maxflux)
-            if mag > 0:
-                mag = ceil(mag)
-            else:
-                mag = floor(mag)
+            mag = ceil(mag) if mag>0 else floor(mag)
             vmax = nice_round_up(maxflux, mag=10**mag)
         else:
             mag = np.log10(vmax)
-            if mag > 0:
-                mag = ceil(mag)
-            else:
-                mag = floor(mag)
+            mag = ceil(mag) if mag>0 else floor(mag)
 
         if vmin is None:
             vmin = 10 ** (mag - 3)
@@ -1930,26 +2075,51 @@ class AshDisperseResult:
         cbar_fig, cbar_ax = plt.subplots()
         if logscale:
             levels = log_levels(vmin, vmax)
-            tmp = cbar_ax.scatter(
-                levels, np.ones_like(levels), c=levels, cmap=cmap, norm=LogNorm()
-            )
+            norm = LogNorm(vmin=vmin, vmax=vmax)
+            # tmp = cbar_ax.scatter(
+            #     levels, np.ones_like(levels), c=levels, cmap=cmap, norm=LogNorm()
+            # )
         else:
             levels = lin_levels(vmin, vmax, num=20)
-            tmp = cbar_ax.scatter(
-                levels, np.ones_like(levels), c=levels, cmap=cmap, norm=Normalize()
-            )
+            norm = Normalize(vmin=vmin, vmax=vmax)
+            # tmp = cbar_ax.scatter(
+            #     levels, np.ones_like(levels), c=levels, cmap=cmap, norm=Normalize()
+            # )
+
+        n_intervals = max(len(levels) - 1, 1)
+        interval_colors = [cmap(i / n_intervals) for i in range(n_intervals)]
+        banded_cmap = ListedColormap(interval_colors)
+        banded_norm = BoundaryNorm(levels, ncolors=banded_cmap.N, clip=False)
 
         fig, ax = plt.subplots()
-        for j, l in enumerate(levels):
-            cntrs = find_contours(data, l)
-            for c in cntrs:
-                ax.fill(
-                    x_intrp(c[:, 1]),
-                    y_intrp(c[:, 0]),
-                    color=cmap(j / len(levels)),
-                    alpha=alpha,
-                    zorder=1,
-                )
+        for j in range(n_intervals):
+                l_low = levels[j]
+                l_high = levels[j + 1]
+                # Choose a representative threshold to find contours;
+                # to fill the band, we can fill between contours of l_low and l_high.
+                # Since find_contours finds a single-level isovalue, a simple approach
+                # is to fill using the lower bound and color it by band j.
+                cntrs = find_contours(data, l_low)
+                for c in cntrs:
+                    ax.fill(
+                        x_intrp(c[:, 1]),
+                        y_intrp(c[:, 0]),
+                        color=interval_colors[j],
+                        alpha=alpha,
+                        zorder=1,
+                    )
+
+        # fig, ax = plt.subplots()
+        # for j, l in enumerate(levels):
+        #     cntrs = find_contours(data, l)
+        #     for c in cntrs:
+        #         ax.fill(
+        #             x_intrp(c[:, 1]),
+        #             y_intrp(c[:, 0]),
+        #             color=cmap(j / len(levels)),
+        #             alpha=alpha,
+        #             zorder=1,
+        #         )
 
         source = self.source_marker.to_crs(webmerc["init"])
         source.plot(ax=ax, marker="^", color="k", markersize=20, zorder=2)
@@ -1973,12 +2143,20 @@ class AshDisperseResult:
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="5%", pad=0.1)
 
-        cbar = plt.colorbar(tmp, ax=ax, cax=cax)
-        cbar.minorticks_off()
-        cbar.set_label("Settling flux (kg/m\u00B2/s)")
-        plt.close(cbar_fig)
+        sm = cm.ScalarMappable(norm=banded_norm, cmap=banded_cmap)
+        sm.set_array([])  # required for some Matplotlib versions
+        cbar = fig.colorbar(sm, cax=cax)
 
-        ax = ax_ticks(ax, source.geometry[0].x, source.geometry[0].y)
+        # cbar = plt.colorbar(tmp, ax=ax, cax=cax)
+        # cbar.minorticks_off()
+        # cbar.set_label("Settling flux (kg/m\u00B2/s)")
+        # plt.close(cbar_fig)
+
+        source_geom = source.geometry.iloc[0]
+        if not isinstance(source_geom, Point):
+            raise TypeError(f"source geometry must be a Point")
+
+        ax = ax_ticks(ax, source_geom.x, source_geom.y)
         if basemap:
             ax = add_opentopo_basemap(ax, zorder=0)
             (Narrow, ntext) = add_north_arrow(ax, zorder=11, fontsize=16)
@@ -1996,24 +2174,28 @@ class AshDisperseResult:
 
     def plot_ashload_for_grain_class(
         self,
-        grain_i,
-        logscale=True,
-        vmin=None,
-        vmax=10,
-        cmap=plt.cm.plasma,
-        basemap=True,
-        alpha=0.5,
-        max_zoom=None,
-        show=True,
-        save=False,
-        save_name="ashdisperse_result.png",
-        min_ax_width=None,
-        min_ax_height=None,
+        grain_i: int,
+        logscale: bool=True,
+        vmin: float = 1e-6,
+        vmax: float | None = None,
+        cmap: str | Colormap = "plasma",
+        basemap: bool = True,
+        alpha: float = 0.5,
+        max_zoom: int | None = None,
+        show: bool = True,
+        save: bool = False,
+        save_name: str = "ashdisperse_result.png",
+        min_ax_width: float | None = None,
+        min_ax_height: float | None = None,
     ):
+        
         self._check_valid_grain(grain_i)
 
+        if isinstance(cmap, str):
+            cmap = plt.get_cmap(cmap)
+
         ds = self.raster_ashload_for_grain_class(
-            grain_i, vmin=1e-6, crs=webmerc["init"]
+            grain_i, vmin=vmin, crs=webmerc["init"]
         )
         if ds is None:
             raise RuntimeError("No data in plot_ashload_for_grain_class()")
@@ -2039,9 +2221,6 @@ class AshDisperseResult:
                 mag = ceil(mag)
             else:
                 mag = floor(mag)
-
-        if vmin is None:
-            vmin = 10 ** (mag - 3)
 
         cbar_fig, cbar_ax = plt.subplots()
         if logscale:
@@ -2095,7 +2274,11 @@ class AshDisperseResult:
         cbar.set_label("Ash load (kg/m\u00B2)")
         plt.close(cbar_fig)
 
-        ax = ax_ticks(ax, source.geometry[0].x, source.geometry[0].y)
+        source_geom = source.geometry.iloc[0]
+        if not isinstance(source_geom, Point):
+            raise TypeError(f"source geometry must be a Point")
+
+        ax = ax_ticks(ax, source_geom.x, source_geom.y)
 
         if basemap:
             ax = add_opentopo_basemap(ax, zorder=0)
@@ -2123,6 +2306,8 @@ class AshDisperseResult:
             masked=False,
             crs=webmerc["init"],
         )
+        if ashload is None:
+            return None
 
         maxload = np.nanmax(ashload["ash_load"])
         mag = np.log10(maxload)
@@ -2147,9 +2332,14 @@ class AshDisperseResult:
         return g
 
     def plot_conc_for_grain_class(
-        self, grain_i, logscale=True, vmin=1e-6, cmap=plt.cm.bone, basemap=False
+        self, grain_i, logscale=True, vmin=1e-6, cmap="bone", basemap=False
     ):
+        
         self._check_valid_grain(grain_i)
+
+        if isinstance(cmap, str):
+            cmap = plt.get_cmap(cmap)
+
         Nz = self.params.output.Nz
         rows, cols = plot_rowscols(Nz + 1)
         fig, axes = plt.subplots(nrows=rows, ncols=cols, sharex=True, sharey=True)
@@ -2234,7 +2424,7 @@ class AshDisperseResult:
                 ax.axis("off")
 
         fig.subplots_adjust(right=0.75)
-        cbar_ax = fig.add_axes([0.8, 0.2, 0.05, 0.7])
+        cbar_ax = fig.add_axes(rect=(0.8, 0.2, 0.05, 0.7))
 
         cbar = fig.colorbar(tmp, cax=cbar_ax)
         cbar.minorticks_off()
@@ -2304,7 +2494,7 @@ class AshDisperseResult:
         self,
         resolution=300.0,
         logscale=True,
-        cmap=plt.cm.viridis,
+        cmap="viridis",
         vmin=1e-3,
         nodata=-1,
         alpha=0.5,
@@ -2351,16 +2541,22 @@ class AshDisperseResult:
         -----
         If ds is not provided, the function computes the total ash load using current model parameters.
         """
+
+        if isinstance(cmap, str):
+            cmap = plt.get_cmap(cmap)
+
         if ds is None:
-            ds = self.compute_total_ashload(resolution=resolution, vmin=vmin/10, nodata=nodata, to_dataset=True)
-            if export_gtiff:
-                arr = ds["ash_load"].values
-                x = ds.x.values
-                y = ds.y.values
-                self.write_gtiff(arr, x, y, export_name, nodata=nodata, vmin=vmin, resolution=None)
+            ds = self.raster_total_ashload(resolution=resolution, vmin=vmin/10, nodata=nodata, crs=webmerc["init"])
+        
         if ds is None:
             raise RuntimeError("No data in plot_ashload()")
 
+        if export_gtiff:
+            arr = ds["ash_load"].values
+            x = ds.x.values
+            y = ds.y.values
+            self.write_gtiff(arr, x, y, export_name, nodata=nodata, vmin=vmin, resolution=None)
+        
         x = ds.x
         y = ds.y
         data = ds["ash_load"].values
@@ -2428,7 +2624,11 @@ class AshDisperseResult:
         cbar.set_label("Ash load (kg/m\u00B2)")
         plt.close(cbar_fig)
 
-        ax = ax_ticks(ax, source.geometry[0].x, source.geometry[0].y)
+        source_geom = source.geometry.iloc[0]
+        if not isinstance(source_geom, Point):
+            raise TypeError(f"source geometry must be a Point")
+
+        ax = ax_ticks(ax, source_geom.x, source_geom.y)
 
         if basemap:
             ax = add_opentopo_basemap(ax, zorder=0)
@@ -2470,51 +2670,57 @@ class AshDisperseResult:
 
         for grain_i in range(self.params.grains.bins):
             g = self.contour_ashload_for_grain_class(grain_i, vmin=1e-4)
-            g = g.to_crs(webmerc["init"])
-            g["geoid"] = g.index.astype(str)
-            loads = g[["geoid", "load", "grain_size", "geometry"]]
-            loads["grain_size"] = loads["grain_size"].astype(float) * 1e6
-            loads["grain_size"] = loads["grain_size"].map("{0:.2f}".format)
+            if g is None:
+                continue
+            else:
+                g = g.to_crs(webmerc["init"])
+                g["geoid"] = g.index.astype(str)
+                loads = g[["geoid", "load", "grain_size", "geometry"]]
+                loads["grain_size"] = loads["grain_size"].astype(float) * 1e6
+                loads["grain_size"] = loads["grain_size"].map("{0:.2f}".format)
 
-            geo_str = loads.to_json()
+                geo_str = loads.to_json()
 
-            if vmin is None:
-                vmin = loads.load.min()
-            vmax = loads.load.max()
+                if vmin is None:
+                    vmin = loads.load.min()
+                vmax = loads.load.max()
 
-            levels = log_steps(
-                nice_round_down(vmin, mag=10 ** np.floor(np.log10(vmin))),
-                nice_round_up(vmax),
-                step=10,
-            )
+                levels = log_steps(
+                    nice_round_down(vmin, mag=10 ** np.floor(np.log10(vmin))),
+                    nice_round_up(vmax),
+                    step=10,
+                )
 
-            cmap = cm.linear.viridis.to_step(
-                data=loads["load"], index=levels, method="log", round_method="log10"
-            )
-            cmap.caption = "ash load (kg/m^2) for {0:.2f} micron grains".format(
-                self.params.grains.diameter[grain_i] * 1e6
-            )
+                
+                viridis: branca_LinearColormap = cast(branca_LinearColormap, getattr(branca_linear, "viridis"))
+                cmap: branca_StepColormap = viridis.to_step(
+                    data=loads["load"], index=levels, method="log", round_method="log10"
+                )
 
-            lm = folium.features.GeoJson(
-                loads,
-                style_function=style_func,
-                control=True,
-                name="Grain size = {0:.2f} microns".format(
+                cmap.caption = "ash load (kg/m^2) for {0:.2f} micron grains".format(
                     self.params.grains.diameter[grain_i] * 1e6
-                ),
-                tooltip=folium.features.GeoJsonTooltip(
-                    fields=["grain_size", "load"],
-                    aliases=["Grain size (microns)", "Ash load (kg/m^2)"],
-                    style=(
-                        "background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px;"
-                    ),
-                    sticky=True,
-                ),
-            )
+                )
 
-            m.add_child(lm)
-            m.add_child(cmap)
-            m.add_child(BindColormap(lm, cmap))
+                lm = folium_features.GeoJson(
+                    loads,
+                    style_function=style_func,
+                    control=True,
+                    name="Grain size = {0:.2f} microns".format(
+                        self.params.grains.diameter[grain_i] * 1e6
+                    ),
+                    tooltip=folium_features.GeoJsonTooltip(
+                        fields=["grain_size", "load"],
+                        aliases=["Grain size (microns)", "Ash load (kg/m^2)"],
+                        style=(
+                            "background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px;"
+                        ),
+                        sticky=True,
+                    ),
+                )
+
+                m.add_child(lm)
+                m.add_child(cmap)
+                m.add_child(BindColormap(lm, cmap))
 
         folium.LayerControl().add_to(m)
 
