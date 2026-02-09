@@ -308,7 +308,18 @@ def _sample_point_from_dataset(
     except Exception as exc:
         warnings.warn(f"Error sampling point from dataset: {exc}")
         return fallback*np.ones_like(x)
+
+
+def _auto_vmin_vmax(data_max: float) -> tuple[float, float]:
         
+        mag = np.log10(data_max)
+        mag = ceil(mag) if mag>0 else floor(mag)
+        vmax = nice_round_up(data_max, mag=10**mag)
+
+        vmin = 10 ** (mag - 3)
+        
+        return (vmin, vmax)
+
 
 class AshDisperseResult:
     """Results of an AshDisperse simulation"""
@@ -2060,31 +2071,23 @@ class AshDisperseResult:
         x_intrp = interp1d(np.arange(len(x)), x)
         y_intrp = interp1d(np.arange(len(y)), y)
 
+        auto_vmin, auto_vmax = _auto_vmin_vmax(np.nanmax(data))
+
         if vmax is None:
-            maxflux = np.nanmax(data)
-            mag = np.log10(maxflux)
-            mag = ceil(mag) if mag>0 else floor(mag)
-            vmax = nice_round_up(maxflux, mag=10**mag)
+            vmax = auto_vmax
         else:
             mag = np.log10(vmax)
             mag = ceil(mag) if mag>0 else floor(mag)
 
         if vmin is None:
-            vmin = 10 ** (mag - 3)
-
-        cbar_fig, cbar_ax = plt.subplots()
+            vmin = auto_vmin
+        
         if logscale:
             levels = log_levels(vmin, vmax)
             norm = LogNorm(vmin=vmin, vmax=vmax)
-            # tmp = cbar_ax.scatter(
-            #     levels, np.ones_like(levels), c=levels, cmap=cmap, norm=LogNorm()
-            # )
         else:
             levels = lin_levels(vmin, vmax, num=20)
             norm = Normalize(vmin=vmin, vmax=vmax)
-            # tmp = cbar_ax.scatter(
-            #     levels, np.ones_like(levels), c=levels, cmap=cmap, norm=Normalize()
-            # )
 
         n_intervals = max(len(levels) - 1, 1)
         interval_colors = [cmap(i / n_intervals) for i in range(n_intervals)]
@@ -2093,33 +2096,21 @@ class AshDisperseResult:
 
         fig, ax = plt.subplots()
         for j in range(n_intervals):
-                l_low = levels[j]
-                l_high = levels[j + 1]
-                # Choose a representative threshold to find contours;
-                # to fill the band, we can fill between contours of l_low and l_high.
-                # Since find_contours finds a single-level isovalue, a simple approach
-                # is to fill using the lower bound and color it by band j.
-                cntrs = find_contours(data, l_low)
-                for c in cntrs:
-                    ax.fill(
-                        x_intrp(c[:, 1]),
-                        y_intrp(c[:, 0]),
-                        color=interval_colors[j],
-                        alpha=alpha,
-                        zorder=1,
-                    )
-
-        # fig, ax = plt.subplots()
-        # for j, l in enumerate(levels):
-        #     cntrs = find_contours(data, l)
-        #     for c in cntrs:
-        #         ax.fill(
-        #             x_intrp(c[:, 1]),
-        #             y_intrp(c[:, 0]),
-        #             color=cmap(j / len(levels)),
-        #             alpha=alpha,
-        #             zorder=1,
-        #         )
+            l_low = levels[j]
+            l_high = levels[j + 1]
+            # Choose a representative threshold to find contours;
+            # to fill the band, we can fill between contours of l_low and l_high.
+            # Since find_contours finds a single-level isovalue, a simple approach
+            # is to fill using the lower bound and color it by band j.
+            cntrs = find_contours(data, l_low)
+            for c in cntrs:
+                ax.fill(
+                    x_intrp(c[:, 1]),
+                    y_intrp(c[:, 0]),
+                    color=interval_colors[j],
+                    alpha=alpha,
+                    zorder=1,
+                )
 
         source = self.source_marker.to_crs(webmerc["init"])
         source.plot(ax=ax, marker="^", color="k", markersize=20, zorder=2)
@@ -2144,13 +2135,16 @@ class AshDisperseResult:
         cax = divider.append_axes("right", size="5%", pad=0.1)
 
         sm = cm.ScalarMappable(norm=banded_norm, cmap=banded_cmap)
+        # sm = cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])  # required for some Matplotlib versions
         cbar = fig.colorbar(sm, cax=cax)
 
-        # cbar = plt.colorbar(tmp, ax=ax, cax=cax)
-        # cbar.minorticks_off()
-        # cbar.set_label("Settling flux (kg/m\u00B2/s)")
-        # plt.close(cbar_fig)
+        if logscale:
+            cbar.locator = ticker.LogLocator(base=10)
+            cbar.formatter = ticker.LogFormatterSciNotation(base=10)
+            cbar.update_ticks()
+
+        cbar.set_label("Settling flux (kg/m\u00B2/s)")
 
         source_geom = source.geometry.iloc[0]
         if not isinstance(source_geom, Point):
@@ -2187,7 +2181,7 @@ class AshDisperseResult:
         save_name: str = "ashdisperse_result.png",
         min_ax_width: float | None = None,
         min_ax_height: float | None = None,
-    ):
+    ) -> tuple[Figure, Axes, Colorbar]:
         
         self._check_valid_grain(grain_i)
 
@@ -2207,14 +2201,10 @@ class AshDisperseResult:
         x_intrp = interp1d(np.arange(len(x)), x)
         y_intrp = interp1d(np.arange(len(y)), y)
 
+        auto_vmin, auto_vmax = _auto_vmin_vmax(np.nanmax(data))
+
         if vmax is None:
-            maxload = np.nanmax(data)
-            mag = np.log10(maxload)
-            if mag > 0:
-                mag = ceil(mag)
-            else:
-                mag = floor(mag)
-            vmax = nice_round_up(maxload, mag=10**mag)
+            vmax = auto_vmax
         else:
             mag = np.log10(vmax)
             if mag > 0:
@@ -2222,26 +2212,31 @@ class AshDisperseResult:
             else:
                 mag = floor(mag)
 
-        cbar_fig, cbar_ax = plt.subplots()
         if logscale:
             levels = log_levels(vmin, vmax)
-            tmp = cbar_ax.scatter(
-                levels, np.ones_like(levels), c=levels, cmap=cmap, norm=LogNorm()
-            )
+            norm = LogNorm(vmin=vmin, vmax=vmax)
         else:
             levels = lin_levels(vmin, vmax, num=20)
-            tmp = cbar_ax.scatter(
-                levels, np.ones_like(levels), c=levels, cmap=cmap, norm=Normalize()
-            )
+            norm = Normalize(vmin=vmin, vmax=vmax)
+
+        n_intervals = max(len(levels) - 1, 1)
+        interval_colors = [cmap(i / n_intervals) for i in range(n_intervals)]
+        banded_cmap = ListedColormap(interval_colors)
+        banded_norm = BoundaryNorm(levels, ncolors=banded_cmap.N, clip=False)
 
         fig, ax = plt.subplots()
-        for j, l in enumerate(levels):
-            cntrs = find_contours(data, l)
+        for j in range(n_intervals):
+            l_low = levels[j]
+            # Choose a representative threshold to find contours;
+            # to fill the band, we can fill between contours of l_low and l_high.
+            # Since find_contours finds a single-level isovalue, a simple approach
+            # is to fill using the lower bound and color it by band j.
+            cntrs = find_contours(data, l_low)
             for c in cntrs:
                 ax.fill(
                     x_intrp(c[:, 1]),
                     y_intrp(c[:, 0]),
-                    color=cmap(j / len(levels)),
+                    color=interval_colors[j],
                     alpha=alpha,
                     zorder=1,
                 )
@@ -2268,18 +2263,23 @@ class AshDisperseResult:
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="5%", pad=0.1)
 
-        cbar = plt.colorbar(tmp, ax=ax, cax=cax)
-        cbar.minorticks_off()
-        # cbar.set_ticks([levels])
+        sm = cm.ScalarMappable(norm=banded_norm, cmap=banded_cmap)
+        # sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])  # required for some Matplotlib versions
+        cbar = fig.colorbar(sm, cax=cax)
+
+        if logscale:
+            cbar.locator = ticker.LogLocator(base=10)
+            cbar.formatter = ticker.LogFormatterSciNotation(base=10)
+            cbar.update_ticks()
+
         cbar.set_label("Ash load (kg/m\u00B2)")
-        plt.close(cbar_fig)
 
         source_geom = source.geometry.iloc[0]
         if not isinstance(source_geom, Point):
             raise TypeError(f"source geometry must be a Point")
 
         ax = ax_ticks(ax, source_geom.x, source_geom.y)
-
         if basemap:
             ax = add_opentopo_basemap(ax, zorder=0)
             (Narrow, ntext) = add_north_arrow(ax, zorder=11, fontsize=16)
@@ -2546,8 +2546,12 @@ class AshDisperseResult:
             cmap = plt.get_cmap(cmap)
 
         if ds is None:
-            ds = self.raster_total_ashload(resolution=resolution, vmin=vmin/10, nodata=nodata, crs=webmerc["init"])
-        
+            ds = self.raster_total_ashload(
+                resolution=resolution, 
+                vmin=vmin/10, 
+                nodata=nodata, 
+                crs=webmerc["init"]
+            )
         if ds is None:
             raise RuntimeError("No data in plot_ashload()")
 
