@@ -61,38 +61,48 @@ def source_xy_dimless_flat(x, y, p):
 
 
 def source_xy_dimless(x, y, p):
-    xx, yy = np.meshgrid(x, y, indexing='ij')
-    pi = np.pi
-    pi2 = pi * pi
+    """Horizontal source distribution and its Fourier coefficients.
 
-    fxy = np.zeros((len(y), len(x), p.grains.bins), dtype=np.float64)
-    fxy_f = np.zeros((len(y), len(x), p.grains.bins), dtype=np.complex128)
+    The source is a Gaussian of radius R (f = 9/(2 pi) exp(-9 r^2 / (2 R^2))
+    in model units).  Its Fourier coefficients are evaluated exactly,
 
-    dx = x[1] - x[0]
-    dy = y[1] - y[0]
+        F(kx, ky) = (-1)^(kx+ky) A exp(-kx^2 / (4 ax) - ky^2 / (4 ay)),
 
-    Lx = p.solver.domX
-    Ly = p.solver.domY
+    with ax = 4.5 (Lx xScale / pi)^2 / R^2 (similarly ay), A = 9/(2 sqrt(ax ay)),
+    and the factor (-1)^(kx+ky) from the grid starting at -pi.  This replaces
+    the FFT of the sampled Gaussian, which was wrong whenever the source is
+    narrower than a grid cell (the total mass then scaled with the cell area;
+    fine ash domains span thousands of km, the source a few km), and which
+    had x along axis 0 although the solver reads axis 0 as y.  Periodic
+    images of the source are neglected (the source is far smaller than the
+    domain).
 
-    # rr2 = Lx**2 * np.power(xx, 2) + Ly**2 * np.power(yy, 2)
+    Returns:
+        fxy: the source sampled on the grid, shape (Ny, Nx, bins), x along
+             axis 1 (for inspection; the solver uses only fxy_f)
+        fxy_f: Fourier coefficients, shape (Ny, Nx, bins), [j, i] <-> (ky_j, kx_i)
+    """
+    Nx = len(x)
+    Ny = len(y)
+    kx = np.fft.fftfreq(Nx, 1.0 / Nx)
+    ky = np.fft.fftfreq(Ny, 1.0 / Ny)
+    phase = np.outer((-1.0) ** np.abs(ky), (-1.0) ** np.abs(kx))
+    xx, yy = np.meshgrid(x, y)  # xx varies along axis 1
+
+    fxy = np.zeros((Ny, Nx, p.grains.bins), dtype=np.float64)
+    fxy_f = np.zeros((Ny, Nx, p.grains.bins), dtype=np.complex128)
 
     R2 = p.source.radius**2
-
     for j in range(p.grains.bins):
-
-        # X2 = p.model.xScale[j] * p.model.yScale[j]
-
-        # T = 9.0 * X2 * rr2 / (2.0 * pi2 * R2)
-
-        x_dim = Lx*p.model.xScale[j]*xx/pi
-        y_dim = Ly*p.model.yScale[j]*yy/pi
-
-        r2_dim = np.power(x_dim, 2) + np.power(y_dim, 2)
-        T = 0.5*9*r2_dim/R2
-
-        fxy[:, :, j] = np.exp(-T) * 9.0 / (2.0 * pi) # note, no R^2 in denominator due to non-dimensionalization
-
-        # fxy[:, :, j] = 9.0 * np.exp(-T) / (2.0 * pi)
-        fxy_f[:, :, j] = fft2(fxy[:, :, j]) * dx * dy
+        # model coordinate x in [-pi, pi) <-> physical Lx * xScale * x / pi
+        sx = p.model.Lx[j] * p.model.xScale[j] / np.pi
+        sy = p.model.Ly[j] * p.model.yScale[j] / np.pi
+        ax = 4.5 * sx**2 / R2
+        ay = 4.5 * sy**2 / R2
+        fxy[:, :, j] = 9.0 / (2.0 * np.pi) * np.exp(-ax * xx**2 - ay * yy**2)
+        amp = 9.0 / (2.0 * np.sqrt(ax * ay))
+        fxy_f[:, :, j] = phase * amp * np.exp(
+            -(kx[None, :] ** 2) / (4.0 * ax) - (ky[:, None] ** 2) / (4.0 * ay)
+        )
 
     return fxy, fxy_f

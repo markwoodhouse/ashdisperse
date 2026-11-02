@@ -114,3 +114,43 @@ def test_lower_elements_match_single_domain_reference(met):
         scale = np.abs(ref.C0_FT[..., k]).max()
         assert np.max(np.abs(el.C0_FT[..., k] - ref.C0_FT[..., k])) < 1e-8 * scale
     assert np.max(np.abs(el.Cz_FT - ref.Cz_FT)) < 1e-7 * np.abs(ref.Cz_FT).max()
+
+
+def _model_params(met, **kw):
+    from ashdisperse.interface import set_met_parameters, set_model_parameters
+    p = _params(**kw)
+    p = set_met_parameters(p, met)
+    p = set_model_parameters(p, met)
+    return p
+
+
+def test_source_transform_matches_resolved_fft_and_orientation(met):
+    from scipy.fft import fft2
+    from ashdisperse.solver import source_xy_dimless
+    from ashdisperse.spectral import grid_freq
+    p = _model_params(met, Nx_log2=9, Ny_log2=9, domY=3.0)  # domY = 2 domX
+    x, _ = grid_freq(512)
+    y, _ = grid_freq(512)
+    fxy, fxy_f = source_xy_dimless(x, y, p)
+    dx = x[1] - x[0]
+    # 1 mm grains: source well resolved on 512^2, so the FFT of the samples
+    # equals the exact transform
+    ref = fft2(fxy[:, :, 0]) * dx * dx
+    assert np.max(np.abs(ref - fxy_f[:, :, 0])) < 1e-10 * np.abs(ref).max()
+    # x along axis 1: with Ly*yScale ~ 2 Lx*xScale the source spans about
+    # half as many model units (cells) along y (axis 0) as along x (axis 1)
+    ratio = (p.model.Ly[0] * p.model.yScale[0]) / (p.model.Lx[0] * p.model.xScale[0])
+    assert ratio > 1.5
+    half = fxy[:, :, 0] > 0.5 * fxy[:, :, 0].max()
+    nx = half.sum(axis=1).max()  # cells along x
+    ny = half.sum(axis=0).max()  # cells along y
+    assert abs(nx / ny - ratio) < 0.2 * ratio
+
+
+def test_deposited_mass_independent_of_grid(met):
+    # 100 um grains: the source is narrower than a grid cell on 32^2.  The
+    # (kx, ky) = (0, 0) mode (total mass) must not depend on the grid.
+    set_num_threads(2)
+    a = ad.solve(_params(Nx_log2=5, Ny_log2=5), met)
+    b = ad.solve(_params(Nx_log2=7, Ny_log2=7), met)
+    assert np.allclose(a.C0_FT[0, 0, :], b.C0_FT[0, 0, :], rtol=1e-12, atol=0)
