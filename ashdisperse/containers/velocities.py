@@ -118,6 +118,17 @@ class VelocityContainer:
         cV_l = cheb_fit(np.ascontiguousarray(Met.wind_V_array(zl, U_scale)))
         Ws_l = Met.settling_speed_array(parameters, zl, Ws_scale)
 
+        # Upper-domain profiles are smoothed in the fixed reference coordinate
+        # xr = 1 - 2H/z (capped at z_top), independent of the grain-dependent
+        # map below, so that ell changes only the discretisation, not the model.
+        zu_ref = np.empty(M, dtype=np.float64)
+        zu_ref[: M - 1] = 2 * H / (1 - xm[: M - 1])
+        zu_ref[M - 1] = z_top
+        zu_ref = np.minimum(zu_ref, z_top)
+        cU_u = cheb_fit(np.ascontiguousarray(Met.wind_U_array(zu_ref, U_scale)))
+        cV_u = cheb_fit(np.ascontiguousarray(Met.wind_V_array(zu_ref, U_scale)))
+        Ws_u = Met.settling_speed_array(parameters, zu_ref, Ws_scale)
+
         # Upper domain: z/H = 1 + ell (1 + x) / (1 - x), one ell per grain.
         # Above the plume, concentration decays over the settling-diffusion
         # length kappa_v / Ws, which for coarse grains is metres.  Scaling the
@@ -156,13 +167,6 @@ class VelocityContainer:
             cdW_l = cheb_deriv(cW_l)
 
             ell = self.ell[ig]
-            zu = np.empty(M, dtype=np.float64)
-            zu[: M - 1] = H * (1 + ell * (1 + xm[: M - 1]) / (1 - xm[: M - 1]))
-            zu[M - 1] = z_top
-            zu = np.minimum(zu, z_top)
-            cU_u = cheb_fit(np.ascontiguousarray(Met.wind_U_array(zu, U_scale)))
-            cV_u = cheb_fit(np.ascontiguousarray(Met.wind_V_array(zu, U_scale)))
-            Ws_u = Met.settling_speed_array(parameters, zu, Ws_scale)
             cW_u = cheb_fit(np.ascontiguousarray(Ws_u[:, ig]))
             cdW_u = cheb_deriv(cW_u)
 
@@ -175,13 +179,16 @@ class VelocityContainer:
                 # d/dz (dimensionless z/H) = 2 d/dx in the lower domain
                 self.dWs[:N, 0, k, ig] = 2.0 * cheb_eval(cdW_l, xl)
 
-                self.z[: N - 1, 1, k, ig] = H * (1 + ell * (1 + xu) / (1 - xu))
-                self.U[: N - 1, 1, k, ig] = cheb_eval(cU_u, xu)
-                self.V[: N - 1, 1, k, ig] = cheb_eval(cV_u, xu)
-                self.Ws[: N - 1, 1, k, ig] = cheb_eval(cW_u, xu)
-                # d/dz = (1 - x)^2 / (2 ell) d/dx in the upper domain
-                self.dWs[: N - 1, 1, k, ig] = (
-                    0.5 * (1 - xu) ** 2 / ell * cheb_eval(cdW_u, xu)
+                # computational x -> z/H -> reference coordinate xr
+                ztu = 1 + ell * (1 + xu) / (1 - xu)
+                xr = 1 - 2 / ztu
+                self.z[: N - 1, 1, k, ig] = H * ztu
+                self.U[: N - 1, 1, k, ig] = cheb_eval(cU_u, xr)
+                self.V[: N - 1, 1, k, ig] = cheb_eval(cV_u, xr)
+                self.Ws[: N - 1, 1, k, ig] = cheb_eval(cW_u, xr)
+                # d/d(z/H) = (1 - xr)^2 / 2 d/dxr
+                self.dWs[: N - 1, 1, k, ig] = 0.5 * (1 - xr) ** 2 * cheb_eval(
+                    cdW_u, xr
                 )
 
             # Chebyshev polynomials at the output altitudes above the plume
