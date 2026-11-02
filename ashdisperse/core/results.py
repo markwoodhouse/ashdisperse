@@ -2617,66 +2617,66 @@ class AshDisperseResult:
             attr="OpenTopoMap"
         )
 
-        style_func = lambda x: {
-            "weight": 0.1,
-            "color": "black",
-            "fillColor": cmap(x["properties"]["load"]),
-            "fillOpacity": 0.5,
-        }
-
         for grain_i in range(self.params.grains.bins):
-            g = self.contour_ashload_for_grain_class(grain_i, vmin=1e-4)
-            if g is None:
+            g = self.contour_ashload_for_grain_class(grain_i, vmin=vmin)
+            if g is None or g.empty:
                 continue
-            else:
-                g = g.to_crs(webmerc["init"])
-                g["geoid"] = g.index.astype(str)
-                loads = g[["geoid", "load", "grain_size", "geometry"]]
-                loads["grain_size"] = loads["grain_size"].astype(float) * 1e6
-                loads["grain_size"] = loads["grain_size"].map("{0:.2f}".format)
 
-                geo_str = loads.to_json()
+            # Leaflet expects geographic (lon/lat) coordinates
+            g = g.to_crs(wgs84["init"])
+            g["geoid"] = g.index.astype(str)
+            loads = g[["geoid", "load", "grain_size", "geometry"]].copy()
+            loads["grain_size"] = loads["grain_size"].astype(float) * 1e6
+            loads["grain_size"] = loads["grain_size"].map("{0:.2f}".format)
 
-                if vmin is None:
-                    vmin = loads.load.min()
-                vmax = loads.load.max()
+            layer_vmin = vmin if vmin is not None else loads.load.min()
+            layer_vmax = loads.load.max()
 
-                levels = log_steps(
-                    nice_round_down(vmin, mag=10 ** np.floor(np.log10(vmin))),
-                    nice_round_up(vmax),
-                    step=10,
-                )
+            levels = log_steps(
+                nice_round_down(layer_vmin, mag=10 ** np.floor(np.log10(layer_vmin))),
+                nice_round_up(layer_vmax),
+                step=10,
+            )
 
-                
-                viridis: branca_LinearColormap = cast(branca_LinearColormap, getattr(branca_linear, "viridis"))
-                cmap: branca_StepColormap = viridis.to_step(
-                    data=loads["load"], index=levels, method="log", round_method="log10"
-                )
+            viridis: branca_LinearColormap = cast(branca_LinearColormap, getattr(branca_linear, "viridis"))
+            cmap: branca_StepColormap = viridis.to_step(
+                data=loads["load"], index=levels, method="log", round_method="log10"
+            )
 
-                cmap.caption = "ash load (kg/m^2) for {0:.2f} micron grains".format(
+            # bind this layer's colormap now; a closure over `cmap` would
+            # pick up the last grain's colormap when the map is rendered
+            def style_func(x, cmap=cmap):
+                return {
+                    "weight": 0.1,
+                    "color": "black",
+                    "fillColor": cmap(x["properties"]["load"]),
+                    "fillOpacity": 0.5,
+                }
+
+            cmap.caption = "ash load (kg/m^2) for {0:.2f} micron grains".format(
+                self.params.grains.diameter[grain_i] * 1e6
+            )
+
+            lm = folium_features.GeoJson(
+                loads,
+                style_function=style_func,
+                control=True,
+                name="Grain size = {0:.2f} microns".format(
                     self.params.grains.diameter[grain_i] * 1e6
-                )
-
-                lm = folium_features.GeoJson(
-                    loads,
-                    style_function=style_func,
-                    control=True,
-                    name="Grain size = {0:.2f} microns".format(
-                        self.params.grains.diameter[grain_i] * 1e6
+                ),
+                tooltip=folium_features.GeoJsonTooltip(
+                    fields=["grain_size", "load"],
+                    aliases=["Grain size (microns)", "Ash load (kg/m^2)"],
+                    style=(
+                        "background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px;"
                     ),
-                    tooltip=folium_features.GeoJsonTooltip(
-                        fields=["grain_size", "load"],
-                        aliases=["Grain size (microns)", "Ash load (kg/m^2)"],
-                        style=(
-                            "background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px;"
-                        ),
-                        sticky=True,
-                    ),
-                )
+                    sticky=True,
+                ),
+            )
 
-                m.add_child(lm)
-                m.add_child(cmap)
-                m.add_child(BindColormap(lm, cmap))
+            m.add_child(lm)
+            m.add_child(cmap)
+            m.add_child(BindColormap(lm, cmap))
 
         folium.LayerControl().add_to(m)
 
