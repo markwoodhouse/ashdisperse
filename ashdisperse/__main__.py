@@ -1,65 +1,103 @@
 import argparse
 import pathlib
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ashdisperse.ashdisperse import solve
 from ashdisperse.config import set_default_threads
 from ashdisperse.config.config import set_threading_layer
 from ashdisperse.interface import set_met, set_parameters
 from ashdisperse.params import load_parameters
+from ashdisperse.utilities.datetime_strings import is_valid_datetime
 
-print("Running AshDisperse")
-now = datetime.utcnow()
-run_start = now.strftime("%Y%m%d%H%M")
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--parameters", "-p", type=str, help="Parameters file name.")
-parser.add_argument("--met_source", "-m", type=str,
-                    choices=['interface', 'gfs', 'ecmwf', 'local'], help="Source of met data.")
-parser.add_argument("-d", "--met_datetime", type=str, help="Date-time string for met data, in format yyyy-mm-dd hh:mm")
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(prog="python -m ashdisperse")
+    parser.add_argument("--parameters", "-p", type=str, help="Parameters file name.")
+    parser.add_argument(
+        "--met_source",
+        "-m",
+        type=str,
+        choices=["interface", "gfs", "ecmwf", "local"],
+        help="Source of met data.",
+    )
+    parser.add_argument(
+        "-d",
+        "--met_datetime",
+        type=str,
+        help="Date-time string for met data, in format yyyy-mm-dd hh:mm",
+    )
+    parser.add_argument(
+        "-f",
+        "--met_file",
+        type=str,
+        help=(
+            "Met data file. Required when met_source is local; "
+            "download location when met_source is ecmwf."
+        ),
+    )
 
-args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-if args.met_source in {'gfs', 'ecmwf'} and args.met_datetime is None:
-    parser.error("met_datetime is required when met_source is {}".format(args.met_source))
+    if args.met_source in {"gfs", "ecmwf", "local"} and args.met_datetime is None:
+        parser.error(f"--met_datetime is required when met_source is {args.met_source}")
+    if args.met_datetime is not None and not is_valid_datetime(args.met_datetime):
+        parser.error(
+            f"--met_datetime '{args.met_datetime}' is not valid; "
+            "required format is yyyy-mm-dd hh:mm"
+        )
+    if args.met_source == "local" and args.met_file is None:
+        parser.error("--met_file is required when met_source is local")
 
-if args.parameters is not None:
-    params_file = pathlib.Path(args.parameters)
-    if not params_file.exists():
-        raise FileExistsError('Parameters file {} does not exist'.format(params_file))
-    if not params_file.is_file():
-        raise FileNotFoundError('Input parameters {} is not a file'.format(args.parameters))
+    return args
 
-    params = load_parameters(params_file)
-else:
-    params = set_parameters()
 
-if args.met_source is not None:
-    met_source = args.met_source
-    met_datetime = args.met_datetime
-    met_datetime_str = met_datetime.replace('-','').replace(':','').replace(' ','')
+def main(argv=None):
+    args = _parse_args(argv)
 
-    met = set_met(params, source=met_source, datetime=met_datetime)
+    print("Running AshDisperse")
+    run_start = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
 
-    save_name = 'AshDisperse_{name}_{met_source}_{met_date}_{run_start}'.format(name=params.source.name, 
-                                                                            met_source=met_source,
-                                                                            met_date=met_datetime_str,
-                                                                            run_start=run_start)
-else:
-    met = set_met(params)
-    save_name = 'AshDisperse_{name}_{run_start}'.format(name=params.source.name, run_start=run_start)
+    if args.parameters is not None:
+        params_file = pathlib.Path(args.parameters)
+        if not params_file.is_file():
+            raise FileNotFoundError(f"Parameters file {params_file} does not exist")
+        params = load_parameters(params_file)
+    else:
+        params = set_parameters()
 
-set_threading_layer(thread_layer='tbb')
-set_default_threads()
-result = solve(params, met, timer=True)
+    if args.met_source is not None:
+        met_kwargs = {}
+        if args.met_datetime is not None:
+            met_kwargs["datetime"] = args.met_datetime
+        if args.met_file is not None:
+            met_kwargs["met_filename"] = args.met_file
 
-for grain_i in range(0, params.grains.bins):
-    result.plot_ashload_for_grain_class(0, vmin=1e-2, save_name=save_name)
+        met = set_met(params, source=args.met_source, **met_kwargs)
 
-# for grain_i in range(0, params.grains.bins):
-#     result.plotSettlingFlux(grain_i)
-#     result.plotConc(grain_i)
-#     result.plotIsoConc(grain_i, 1e-4)
+        save_name = f"AshDisperse_{params.source.name}_{args.met_source}"
+        if args.met_datetime is not None:
+            met_datetime_str = (
+                args.met_datetime.replace("-", "").replace(":", "").replace(" ", "")
+            )
+            save_name += f"_{met_datetime_str}"
+        save_name += f"_{run_start}"
+    else:
+        met = set_met(params)
+        save_name = f"AshDisperse_{params.source.name}_{run_start}"
 
-# _ = result.getAshLoad(resolution=500., vmin=1e-4, nodata=-1,
-#                       export_gtiff=True, export_name='AshLoad.tif')
+    set_threading_layer(thread_layer="tbb")
+    set_default_threads()
+    result = solve(params, met, timer=True)
+
+    for grain_i in range(params.grains.bins):
+        result.plot_ashload_for_grain_class(
+            grain_i,
+            vmin=1e-2,
+            show=False,
+            save=True,
+            save_name=f"{save_name}_grain{grain_i}.png",
+        )
+
+
+if __name__ == "__main__":
+    main()
