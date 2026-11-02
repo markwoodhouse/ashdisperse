@@ -2396,43 +2396,30 @@ class AshDisperseResult:
 
         if np.nanmax(C) < conc:
             message = (
-                "In plotIsoConc, no concentration values in excess of"
-                + " {}".format(conc)
+                "In plot_iso_conc_for_grain_class, no concentration values"
+                + " in excess of {}".format(conc)
             )
             print(message)
-            return
+            return None
 
-        # xyScale = self.params.model.xyScale[grain_i]
-        xScale = self.params.model.xScale[grain_i]
-        yScale = self.params.model.yScale[grain_i]
+        z = np.asarray(self.params.output.altitudes, dtype=np.float64)
+        if len(z) < 2:
+            raise ValueError(
+                "plot_iso_conc_for_grain_class requires at least two output altitudes"
+            )
 
-        z = self.params.output.altitudes
-
+        # C is ordered [y, x, z], so vertex columns are (row=y, col=x, z)
         verts, faces, _, _ = marching_cubes(
-            np.where(C > conc, np.ones_like(C), np.zeros_like(C)),
+            np.where(C > conc, 1.0, 0.0),
             0.5,
             spacing=(1, 1, 1),
         )
 
-        dx = self.x_dimless[1] - self.x_dimless[0]
-        dy = self.y_dimless[1] - self.y_dimless[0]
-        dz = z[1] - z[0]
-
-        yv = (
-            (verts[:, 0] * dx - np.pi)
-            * xScale #xyScale
-            * self.params.model.Lx[grain_i]
-            / np.pi
-            / 1e3
-        )
-        xv = (
-            (verts[:, 1] * dy - np.pi)
-            * yScale #xyScale
-            * self.params.model.Ly[grain_i]
-            / np.pi
-            / 1e3
-        )
-        zv = verts[:, 2] * dz
+        # map fractional grid indices to physical coordinates; this handles
+        # different x/y scalings and non-uniform altitudes
+        yv = np.interp(verts[:, 0], np.arange(C.shape[0]), self.y[:, grain_i]) / 1e3
+        xv = np.interp(verts[:, 1], np.arange(C.shape[1]), self.x[:, grain_i]) / 1e3
+        zv = np.interp(verts[:, 2], np.arange(C.shape[2]), z)
 
         fig = plt.figure()
         ax = fig.add_subplot(111, projection="3d")
@@ -2441,6 +2428,8 @@ class AshDisperseResult:
         ax.set_xlabel("Easting (km)")
         ax.set_ylabel("Northing (km)")
         ax.set_zlabel("Altitude (m)")
+
+        return (fig, ax)
 
     def plot_ashload(
         self,
