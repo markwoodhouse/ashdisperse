@@ -1998,6 +1998,126 @@ class AshDisperseResult:
 
         return g[["SettlingFlux", "GrainClass", "GrainSize", "geometry"]]
 
+    def _plot_banded_raster(
+        self,
+        ds: xa.Dataset,
+        var: str,
+        label: str,
+        logscale: bool = True,
+        vmin: float = 1e-6,
+        vmax: float | None = None,
+        cmap: str | Colormap = "viridis",
+        basemap: bool = True,
+        alpha: float = 0.5,
+        max_zoom: int | None = None,
+        show: bool = True,
+        save: bool = False,
+        save_name: str = "ashdisperse_result.png",
+        min_ax_width: float | None = None,
+        min_ax_height: float | None = None,
+    ) -> tuple[Figure, Axes, Colorbar]:
+        """Plot a Web Mercator raster as filled contour bands on a map.
+
+        Bands are drawn with contourf so each region is filled once with the
+        colour of its band and the colorbar matches the fill colours exactly.
+        Values below vmin are left unfilled; values above vmax take the top
+        band colour.
+        """
+        if isinstance(cmap, str):
+            cmap = plt.get_cmap(cmap)
+
+        x = np.asarray(ds.x.values, dtype=np.float64)
+        y = np.asarray(ds.y.values, dtype=np.float64)
+        data = np.asarray(ds[var].values, dtype=np.float64)
+        data = np.where(np.isfinite(data) & (data >= vmin), data, np.nan)
+
+        if not np.any(np.isfinite(data)):
+            raise RuntimeError(f"No {label.lower()} values above vmin={vmin} to plot")
+
+        if vmax is None:
+            _, vmax = _auto_vmin_vmax(np.nanmax(data))
+
+        if logscale:
+            levels = log_levels(vmin, vmax)
+            norm: Normalize = LogNorm(vmin=vmin, vmax=vmax)
+        else:
+            levels = lin_levels(vmin, vmax, num=20)
+            norm = Normalize(vmin=vmin, vmax=vmax)
+
+        if len(levels) < 2:
+            raise ValueError(
+                f"Need vmin < vmax to draw contour bands (vmin={vmin}, vmax={vmax})"
+            )
+
+        fig, ax = plt.subplots()
+        cs = ax.contourf(
+            x,
+            y,
+            data,
+            levels=levels,
+            cmap=cmap,
+            norm=norm,
+            alpha=alpha,
+            extend="max",
+            zorder=1,
+        )
+
+        source = self.source_marker.to_crs(webmerc["init"])
+        source.plot(ax=ax, marker="^", color="k", markersize=20, zorder=2)
+        source_geom = source.geometry.iloc[0]
+        if not isinstance(source_geom, Point):
+            raise TypeError("source geometry must be a Point")
+
+        # frame the plotted region (and the source) with a margin
+        rows, cols = np.nonzero(np.isfinite(data))
+        x0 = min(x[cols].min(), source_geom.x)
+        x1 = max(x[cols].max(), source_geom.x)
+        y0 = min(y[rows].min(), source_geom.y)
+        y1 = max(y[rows].max(), source_geom.y)
+        ax.set_xlim(x0, x1)
+        ax.set_ylim(y0, y1)
+        width = 1.5 * (x1 - x0)
+        height = 1.5 * (y1 - y0)
+        if min_ax_width is not None:
+            width = max(width, min_ax_width)
+        if min_ax_height is not None:
+            height = max(height, min_ax_height)
+        set_min_axes(ax, min_width=width, min_height=height)
+
+        fig = set_figure_size(fig, ax)
+
+        ax.get_xaxis().set_visible(False)
+        ax.get_yaxis().set_visible(False)
+
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.1)
+        cbar = fig.colorbar(
+            cs, cax=cax, spacing="proportional" if logscale else "uniform"
+        )
+        if logscale:
+            cbar.locator = ticker.LogLocator(base=10)
+            cbar.formatter = ticker.LogFormatterSciNotation(base=10)
+            cbar.update_ticks()
+        cbar.set_label(label)
+
+        ax = ax_ticks(ax, source_geom.x, source_geom.y)
+        if basemap:
+            ax = add_opentopo_basemap(
+                ax, max_zoom=13 if max_zoom is None else max_zoom, zorder=0
+            )
+            add_north_arrow(ax, zorder=11, fontsize=16)
+            add_scale_bar(ax, segments=1)
+
+        fig.canvas.draw_idle()
+        if save:
+            fig.savefig(save_name, dpi=300, transparent=True, format="png")
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+        return (fig, ax, cbar)
+
     def plot_settling_flux_for_grain_class(
         self,
         grain_i: int,
@@ -2029,101 +2149,23 @@ class AshDisperseResult:
         if ds is None:
             raise RuntimeError("No data in plot_settling_flux_for_grain_class()")
 
-        x = ds.x
-        y = ds.y
-        data = ds["settling_flux"].values
-
-        x_intrp = interp1d(np.arange(len(x)), x)
-        y_intrp = interp1d(np.arange(len(y)), y)
-
-        _, auto_vmax = _auto_vmin_vmax(np.nanmax(data))
-
-        if vmax is None:
-            vmax = auto_vmax
-        
-        if logscale:
-            levels = log_levels(vmin, vmax)
-            norm = LogNorm(vmin=vmin, vmax=vmax)
-        else:
-            levels = lin_levels(vmin, vmax, num=20)
-            norm = Normalize(vmin=vmin, vmax=vmax)
-
-        n_intervals = max(len(levels) - 1, 1)
-        interval_colors = [cmap(i / n_intervals) for i in range(n_intervals)]
-        banded_cmap = ListedColormap(interval_colors)
-        banded_norm = BoundaryNorm(levels, ncolors=banded_cmap.N, clip=False)
-
-        fig, ax = plt.subplots()
-        for j in range(n_intervals):
-            l_low = levels[j]
-            l_high = levels[j + 1]
-            # Choose a representative threshold to find contours;
-            # to fill the band, we can fill between contours of l_low and l_high.
-            # Since find_contours finds a single-level isovalue, a simple approach
-            # is to fill using the lower bound and color it by band j.
-            cntrs = find_contours(data, l_low)
-            for c in cntrs:
-                ax.fill(
-                    x_intrp(c[:, 1]),
-                    y_intrp(c[:, 0]),
-                    color=interval_colors[j],
-                    alpha=alpha,
-                    zorder=1,
-                )
-
-        source = self.source_marker.to_crs(webmerc["init"])
-        source.plot(ax=ax, marker="^", color="k", markersize=20, zorder=2)
-
-        xlim = list(ax.get_xlim())
-        ylim = list(ax.get_ylim())
-
-        x_width = xlim[1] - xlim[0]
-        y_height = ylim[1] - ylim[0]
-
-        min_ax_width = int(1.5 * x_width)
-        min_ax_height = int(1.5 * y_height)
-
-        set_min_axes(ax, min_width=min_ax_width, min_height=min_ax_height)
-
-        fig = set_figure_size(fig, ax)
-
-        ax.get_xaxis().set_visible(False)
-        ax.get_yaxis().set_visible(False)
-
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="5%", pad=0.1)
-
-        sm = cm.ScalarMappable(norm=banded_norm, cmap=banded_cmap)
-        # sm = cm.ScalarMappable(norm=norm, cmap=cmap)
-        sm.set_array([])  # required for some Matplotlib versions
-        cbar = fig.colorbar(sm, cax=cax)
-
-        if logscale:
-            cbar.locator = ticker.LogLocator(base=10)
-            cbar.formatter = ticker.LogFormatterSciNotation(base=10)
-            cbar.update_ticks()
-
-        cbar.set_label("Settling flux (kg/m\u00B2/s)")
-
-        source_geom = source.geometry.iloc[0]
-        if not isinstance(source_geom, Point):
-            raise TypeError(f"source geometry must be a Point")
-
-        ax = ax_ticks(ax, source_geom.x, source_geom.y)
-        if basemap:
-            ax = add_opentopo_basemap(ax, zorder=0)
-            (Narrow, ntext) = add_north_arrow(ax, zorder=11, fontsize=16)
-            (scalebar, sbframe) = add_scale_bar(ax, segments=1)
-
-        plt.draw()
-        if save:
-            plt.savefig(save_name, dpi=300, transparent=True, format="png")
-
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
-        return (fig, ax, cbar)
+        return self._plot_banded_raster(
+            ds,
+            "settling_flux",
+            "Settling flux (kg/m\u00B2/s)",
+            logscale=logscale,
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap,
+            basemap=basemap,
+            alpha=alpha,
+            max_zoom=max_zoom,
+            show=show,
+            save=save,
+            save_name=save_name,
+            min_ax_width=min_ax_width,
+            min_ax_height=min_ax_height,
+        )
 
     def plot_ashload_for_grain_class(
         self,
@@ -2156,100 +2198,23 @@ class AshDisperseResult:
         if ds is None:
             raise RuntimeError("No data in plot_ashload_for_grain_class()")
 
-        x = ds.x
-        y = ds.y
-        data = ds["ash_load"].values
-
-        x_intrp = interp1d(np.arange(len(x)), x)
-        y_intrp = interp1d(np.arange(len(y)), y)
-
-        _, auto_vmax = _auto_vmin_vmax(np.nanmax(data))
-
-        if vmax is None:
-            vmax = auto_vmax
-
-        if logscale:
-            levels = log_levels(vmin, vmax)
-            norm = LogNorm(vmin=vmin, vmax=vmax)
-        else:
-            levels = lin_levels(vmin, vmax, num=20)
-            norm = Normalize(vmin=vmin, vmax=vmax)
-
-        n_intervals = max(len(levels) - 1, 1)
-        interval_colors = [cmap(i / n_intervals) for i in range(n_intervals)]
-        banded_cmap = ListedColormap(interval_colors)
-        banded_norm = BoundaryNorm(levels, ncolors=banded_cmap.N, clip=False)
-
-        fig, ax = plt.subplots()
-        for j in range(n_intervals):
-            l_low = levels[j]
-            # Choose a representative threshold to find contours;
-            # to fill the band, we can fill between contours of l_low and l_high.
-            # Since find_contours finds a single-level isovalue, a simple approach
-            # is to fill using the lower bound and color it by band j.
-            cntrs = find_contours(data, l_low)
-            for c in cntrs:
-                ax.fill(
-                    x_intrp(c[:, 1]),
-                    y_intrp(c[:, 0]),
-                    color=interval_colors[j],
-                    alpha=alpha,
-                    zorder=1,
-                )
-
-        source = self.source_marker.to_crs(webmerc["init"])
-        source.plot(ax=ax, marker="^", color="k", markersize=20, zorder=2)
-
-        xlim = list(ax.get_xlim())
-        ylim = list(ax.get_ylim())
-
-        x_width = xlim[1] - xlim[0]
-        y_height = ylim[1] - ylim[0]
-
-        min_ax_width = int(1.5 * x_width)
-        min_ax_height = int(1.5 * y_height)
-
-        set_min_axes(ax, min_width=min_ax_width, min_height=min_ax_height)
-
-        fig = set_figure_size(fig, ax)
-
-        ax.get_xaxis().set_visible(False)
-        ax.get_yaxis().set_visible(False)
-
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="5%", pad=0.1)
-
-        sm = cm.ScalarMappable(norm=banded_norm, cmap=banded_cmap)
-        # sm = cm.ScalarMappable(norm=norm, cmap=cmap)
-        sm.set_array([])  # required for some Matplotlib versions
-        cbar = fig.colorbar(sm, cax=cax)
-
-        if logscale:
-            cbar.locator = ticker.LogLocator(base=10)
-            cbar.formatter = ticker.LogFormatterSciNotation(base=10)
-            cbar.update_ticks()
-
-        cbar.set_label("Ash load (kg/m\u00B2)")
-
-        source_geom = source.geometry.iloc[0]
-        if not isinstance(source_geom, Point):
-            raise TypeError(f"source geometry must be a Point")
-
-        ax = ax_ticks(ax, source_geom.x, source_geom.y)
-        if basemap:
-            ax = add_opentopo_basemap(ax, zorder=0)
-            (Narrow, ntext) = add_north_arrow(ax, zorder=11, fontsize=16)
-            (scalebar, sbframe) = add_scale_bar(ax, segments=1)
-
-        plt.draw()
-        if save:
-            plt.savefig(save_name, dpi=300, transparent=True, format="png")
-
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
-        return (fig, ax, cbar)
+        return self._plot_banded_raster(
+            ds,
+            "ash_load",
+            "Ash load (kg/m\u00B2)",
+            logscale=logscale,
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap,
+            basemap=basemap,
+            alpha=alpha,
+            max_zoom=max_zoom,
+            show=show,
+            save=save,
+            save_name=save_name,
+            min_ax_width=min_ax_width,
+            min_ax_height=min_ax_height,
+        )
 
     def contour_ashload_for_grain_class(self, grain_i, cntrs_levels="log", vmin=1e-2):
 
@@ -2509,93 +2474,19 @@ class AshDisperseResult:
             y = ds.y.values
             self.write_gtiff(arr, x, y, export_name, nodata=nodata, vmin=vmin, resolution=None)
         
-        x = ds.x
-        y = ds.y
-        data = ds["ash_load"].values
+        return self._plot_banded_raster(
+            ds,
+            "ash_load",
+            "Ash load (kg/m\u00B2)",
+            logscale=logscale,
+            vmin=vmin,
+            vmax=None,
+            cmap=cmap,
+            basemap=basemap,
+            alpha=alpha,
+            show=show,
+        )
 
-        x_intrp = interp1d(np.arange(len(x)), x)
-        y_intrp = interp1d(np.arange(len(y)), y)
-
-        maxc = np.nanmax(data)
-        mag = np.log10(maxc)
-        if mag > 0:
-            mag = ceil(mag)
-        else:
-            mag = floor(mag)
-        vmax = nice_round_up(maxc, mag=10**mag)
-        data = np.ma.masked_where(data <= vmin, data)
-
-        cbar_fig, cbar_ax = plt.subplots()
-        if logscale:
-            levels = log_levels(vmin, vmax)
-            tmp = cbar_ax.scatter(
-                levels, np.ones_like(levels), c=levels, cmap=cmap, norm=LogNorm()
-            )
-        else:
-            levels = lin_levels(vmin, vmax, num=20)
-            tmp = cbar_ax.scatter(
-                levels, np.ones_like(levels), c=levels, cmap=cmap, norm=Normalize()
-            )
-
-        fig, ax = plt.subplots()
-        for j, l in enumerate(levels):
-            cntrs = find_contours(data, l)
-            for c in cntrs:
-                ax.fill(
-                    x_intrp(c[:, 1]),
-                    y_intrp(c[:, 0]),
-                    color=cmap(j / len(levels)),
-                    alpha=alpha,
-                    zorder=1,
-                )
-
-        source = self.source_marker.to_crs(webmerc["init"])
-        source.plot(ax=ax, marker="^", color="k", markersize=20, zorder=2)
-
-        xlim = list(ax.get_xlim())
-        ylim = list(ax.get_ylim())
-
-        x_width = xlim[1] - xlim[0]
-        y_height = ylim[1] - ylim[0]
-
-        min_ax_width = int(1.5 * x_width)
-        min_ax_height = int(1.5 * y_height)
-
-        set_min_axes(ax, min_width=min_ax_width, min_height=min_ax_height)
-
-        fig = set_figure_size(fig, ax)
-
-        ax.get_xaxis().set_visible(False)
-        ax.get_yaxis().set_visible(False)
-
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="5%", pad=0.1)
-
-        cbar = plt.colorbar(tmp, ax=ax, cax=cax)
-        cbar.minorticks_off()
-        cbar.set_label("Ash load (kg/m\u00B2)")
-        plt.close(cbar_fig)
-
-        source_geom = source.geometry.iloc[0]
-        if not isinstance(source_geom, Point):
-            raise TypeError(f"source geometry must be a Point")
-
-        ax = ax_ticks(ax, source_geom.x, source_geom.y)
-
-        if basemap:
-            ax = add_opentopo_basemap(ax, zorder=0)
-            (Narrow, ntext) = add_north_arrow(ax, zorder=11, fontsize=16)
-            (scalebar, sbframe) = add_scale_bar(ax, segments=1)
-
-        plt.draw()
-
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
-
-        return (fig, ax, cbar)
-    
     def plot_spectrum_for_grainsize(self, grain_i, vmin=None, vmax=None):
         fig, ax = plt.subplots()
         im = ax.imshow(np.log10(np.absolute(self.C0_FT[:,:,grain_i])), vmin=vmin, vmax=vmax)
