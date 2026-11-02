@@ -115,10 +115,14 @@ def LowerODE_from(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_star
 
         coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
 
-        co0 = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
-        co1 = truncateCoeffs(coeffs[:, 1].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
+        # The chop test decides convergence; the full series are returned
+        # (truncating at the chop cutoff cost accuracy for no real saving).
+        co0 = np.ascontiguousarray(coeffs[:, 0])
+        co1 = np.ascontiguousarray(coeffs[:, 1])
+        cut0 = truncateCoeffs(co0, parameters.solver.epsilon, parameters.solver.plateau_factor).size
+        cut1 = truncateCoeffs(co1, parameters.solver.epsilon, parameters.solver.plateau_factor).size
 
-        if (co0.size < N) and (co1.size < N):
+        if (cut0 < N) and (cut1 < N):
             k_used = k
             break
 
@@ -203,9 +207,11 @@ def UpperODE_from(kx, ky, grain_i, cheby, parameters, velocities, k_start):
 
         coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
 
-        co = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
+        # The chop test decides convergence; the full series is returned.
+        co = np.ascontiguousarray(coeffs[:, 0])
+        cut = truncateCoeffs(co, parameters.solver.epsilon, parameters.solver.plateau_factor).size
 
-        if co.size < N:
+        if cut < N:
             k_used = k
             break
 
