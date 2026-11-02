@@ -18,13 +18,12 @@ from shapely.geometry import (LinearRing, LineString, MultiLineString,
                               mapping)
 from shapely.ops import linemerge, polygonize, transform, unary_union
 
-from ..utilities import nice_round_down
+from ..utilities import latlon_point_to_utm_code, nice_round_down
 from .epsg_defs import webmerc, wgs84
 
 
 def latlon_to_utm_epsg(lat, lon):
-    offset = int(round((183+lon)/6.0))
-    return 32600+offset if (lat > 0) else 32700+offset
+    return latlon_point_to_utm_code(lat, lon)
 
 def expand_axes(ax,abs_x=0,abs_y=0):
     x0, x1, y0, y1 = ax.axis()

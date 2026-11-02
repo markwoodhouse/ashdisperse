@@ -55,8 +55,7 @@ class SourceParameters:
         return 1
 
     def utm_from_latlon(self):
-        offset = int(np.round((183+self.longitude)/6.0))
-        self.utmcode = int(32600+offset) if (self.latitude > 0) else int(32700+offset)
+        self.utmcode = latlon_point_to_utm_code(self.latitude, self.longitude)
         return
 
     def from_values(self,
