@@ -56,3 +56,21 @@ def test_truncate_coeffs_complex():
     t = truncateCoeffs(c.astype(np.complex128), 1e-10, 10.0)
     assert 30 <= t.size < n
     assert np.all(t == c[: t.size])
+
+
+def test_solve_inplace_matches_numpy():
+    from ashdisperse.spectral.lapack import solve_inplace
+    rng = np.random.default_rng(3)
+    for N, nrhs in ((5, 1), (33, 2), (64, 3)):
+        L = rng.random((N, N)) + 1j * rng.random((N, N)) + N * np.eye(N)
+        B = rng.random((nrhs, N)) + 1j * rng.random((nrhs, N))
+        X = B.copy()
+        solve_inplace(L.copy(), X)
+        assert np.allclose(L @ X.T, B.T, rtol=0, atol=1e-12)
+
+
+def test_solve_inplace_singular():
+    from ashdisperse.spectral.lapack import solve_inplace
+    L = np.zeros((4, 4), dtype=np.complex128)
+    with pytest.raises(ValueError):
+        solve_inplace(L, np.ones((1, 4), dtype=np.complex128))

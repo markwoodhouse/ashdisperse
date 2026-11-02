@@ -9,8 +9,8 @@ from ..met.met import MetData_type
 from ..params.params import Parameters_type
 from ..spectral.cheb import (cheb_dif_m1, cheb_dif_p1, standard_chop,
                              truncateCoeffs)
-from .getters import (Source_z_dimless, lower_dWsdz, lower_U, lower_V,
-                      lower_Ws, upper_dWsdz, upper_U, upper_V, upper_Ws)
+from ..spectral.lapack import solve_inplace
+from .getters import Source_z_dimless
 
 # from .rk import integrateTo
 
@@ -74,28 +74,30 @@ def LowerODE_from(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_star
     rPe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
     Vratio = parameters.model.Velocity_ratio[grain_i]
     R = parameters.model.Diffusion_ratio
+    kxL = kx / Lx
+    kyL = ky / Ly
+    kk = -pi * pi * rPe / Vratio * (kxL * kxL + kyL * kyL)
 
     k_used = cheby.N.size - 1
     for k in range(min(k_start, cheby.N.size - 1), cheby.N.size):
         N = cheby.N[k]
         x, Tn, dTn, d2Tn = cheby.get_cheb(k)
-        U = lower_U(velocities, k) # dimensionless U
-        V = lower_V(velocities, k) # dimensionless V
-        Ws = lower_Ws(velocities, k)[:, grain_i] # dimensionless
-        dWsdz = lower_dWsdz(velocities, k)[:, grain_i] # dimensionless
 
-        c2 = 4.0 * rPe * Vratio / R * np.ones(N, dtype=np.float64)
-        c1 = 2 * Ws
-
-        c0 = (
-            -1j * pi * (kx / Lx * U + ky / Ly * V)
-            + dWsdz
-            - pi * pi * rPe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
-        )
+        # Coefficients read straight from the (dimensionless) velocity
+        # container in one pass, without per-mode copies or temporaries.
+        c2 = np.full(N, 4.0 * rPe * Vratio / R, dtype=np.float64)
+        c1 = np.empty(N, dtype=np.float64)
+        c0 = np.empty(N, dtype=np.complex128)
+        for r in range(N):
+            c1[r] = 2.0 * velocities.Ws[r, 0, k, grain_i]
+            c0[r] = complex(
+                velocities.dWs[r, 0, k, grain_i] + kk,
+                -pi * (kxL * velocities.U[r, 0, k, 0] + kyL * velocities.V[r, 0, k, 0]),
+            )
 
         L = assemble_operator(c2, c1, c0, Tn, dTn, d2Tn)
 
-        b = np.zeros((N, 2), dtype=np.complex128)
+        b = np.zeros((2, N), dtype=np.complex128)  # one right-hand side per row
         fz = Source_z_dimless(0.5 * (x + 1), 
                               parameters.emission.profile[grain_i],
                               parameters.emission.Suzuki_k[grain_i],
@@ -106,19 +108,18 @@ def LowerODE_from(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_star
         L[0, :] = dTn[0, :]
         L[-1, :] = Tn[-1, :]
 
-        b[:, 0] = -fxy_ij * fz
+        b[0, :] = -fxy_ij * fz
         b[0, 0] = 0.0
-        b[-1, 0] = 0.0
+        b[0, -1] = 0.0
 
-        b[0, 1] = 0.0
-        b[-1, 1] = 1.0
+        b[1, -1] = 1.0
 
-        coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
+        solve_inplace(L, b)
 
         # The chop test decides convergence; the full series are returned
         # (truncating at the chop cutoff cost accuracy for no real saving).
-        co0 = np.ascontiguousarray(coeffs[:, 0])
-        co1 = np.ascontiguousarray(coeffs[:, 1])
+        co0 = b[0]
+        co1 = b[1]
         cut0 = truncateCoeffs(co0, parameters.solver.epsilon, parameters.solver.plateau_factor).size
         cut1 = truncateCoeffs(co1, parameters.solver.epsilon, parameters.solver.plateau_factor).size
 
@@ -172,43 +173,43 @@ def UpperODE_from(kx, ky, grain_i, cheby, parameters, velocities, k_start):
     # map z/H = 1 + ell (1 + x)/(1 - x): d/dz = (1-x)^2/(2 ell) d/dx,
     # d2/dz2 = (1-x)^4/(4 ell^2) d2/dx2 - (1-x)^3/(2 ell^2) d/dx
     ell = velocities.ell[grain_i]
+    a_diff = rPe * Vratio / R
+    kxL = kx / Lx
+    kyL = ky / Ly
+    kk = -pi * pi * rPe / Vratio * (kxL * kxL + kyL * kyL)
 
     k_used = cheby.N.size - 1
     for k in range(min(k_start, cheby.N.size - 1), cheby.N.size):
         N = cheby.N[k]
         x, Tn, dTn, d2Tn = cheby.get_cheb(k)
-        U = upper_U(velocities, k, grain_i)
-        V = upper_V(velocities, k, grain_i)
-        Ws = upper_Ws(velocities, k)[:, grain_i]
-        dWsdz = upper_dWsdz(velocities, k)[:, grain_i]
 
+        # Row N-1 (x = 1, z = infinity) is replaced by a boundary condition.
         c2 = np.zeros(N, dtype=np.float64)
-        c2[:-1] = ((1 - x[:-1]) ** 4) / (4 * ell * ell) * rPe * Vratio / R
-
         c1 = np.zeros(N, dtype=np.float64)
-        c1[:-1] = ((1 - x[:-1]) ** 2) / (2 * ell) * (
-            Ws - (1 - x[:-1]) * rPe * Vratio / R / ell
-        )
-
         c0 = np.zeros(N, dtype=np.complex128)
-        c0[:-1] = (
-            -1j * pi * (kx / Lx * U + ky / Ly * V)
-            + dWsdz
-            - pi * pi * rPe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
-        )
+        for r in range(N - 1):
+            omx = 1.0 - x[r]
+            c2[r] = omx ** 4 / (4 * ell * ell) * a_diff
+            c1[r] = omx * omx / (2 * ell) * (
+                velocities.Ws[r, 1, k, grain_i] - omx * a_diff / ell
+            )
+            c0[r] = complex(
+                velocities.dWs[r, 1, k, grain_i] + kk,
+                -pi * (kxL * velocities.U[r, 1, k, grain_i] + kyL * velocities.V[r, 1, k, grain_i]),
+            )
 
         L = assemble_operator(c2, c1, c0, Tn, dTn, d2Tn)
-        b = np.zeros((N, 1), dtype=np.complex128)
+        b = np.zeros((1, N), dtype=np.complex128)
 
         L[0, :] = Tn[0, :]
         L[-1, :] = Tn[-1, :]
 
         b[0, 0] = 1.0
 
-        coeffs = np.linalg.solve(L, b)  # .astype(np.complex128)
+        solve_inplace(L, b)
 
         # The chop test decides convergence; the full series is returned.
-        co = np.ascontiguousarray(coeffs[:, 0])
+        co = b[0]
         cut = truncateCoeffs(co, parameters.solver.epsilon, parameters.solver.plateau_factor).size
 
         if cut < N:
@@ -379,28 +380,28 @@ def LowerElements(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_star
             c1 = Ws / J
             c0 = -1j * pi * (kx / Lx * U + ky / Ly * V) + dWs + kk
             L = assemble_operator(c2, np.ascontiguousarray(c1), c0, Tn, dTn, d2Tn)
-            b = np.zeros((N, 3), dtype=np.complex128)
+            b = np.zeros((3, N), dtype=np.complex128)  # one right-hand side per row
             fz = Source_z_dimless(np.ascontiguousarray(zt),
                                   parameters.emission.profile[grain_i],
                                   parameters.emission.Suzuki_k[grain_i],
                                   parameters.emission.lower[grain_i],
                                   parameters.emission.upper[grain_i],
                                   parameters.source.PlumeHeight)
-            b[:, 0] = -fxy_ij * fz
+            b[0, :] = -fxy_ij * fz
             b[0, 0] = 0.0
-            b[N - 1, 0] = 0.0
+            b[0, N - 1] = 0.0
             if e == 0:
                 L[0, :] = dTn[0, :]   # C'(ground) = 0
-                b[N - 1, 1] = 1.0     # h(top) = 1
+                b[1, N - 1] = 1.0     # h(top) = 1
             else:
                 L[0, :] = Tn[0, :]
-                b[0, 1] = 1.0         # g(bottom) = 1
-                b[N - 1, 2] = 1.0     # h(top) = 1
+                b[1, 0] = 1.0         # g(bottom) = 1
+                b[2, N - 1] = 1.0     # h(top) = 1
             L[N - 1, :] = Tn[N - 1, :]
-            co = np.linalg.solve(L, b)
+            solve_inplace(L, b)
             for col in range(3):
                 for n in range(N):
-                    raw[e, col, n] = co[n, col]
+                    raw[e, col, n] = b[col, n]
                 for n in range(N, maxN):
                     raw[e, col, n] = 0.0
             sizes[e] = N
