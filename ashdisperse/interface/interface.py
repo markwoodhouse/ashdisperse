@@ -652,36 +652,44 @@ def set_met(params_set, source="interface", **kwargs):
             gui = False
         met_set = _set_met_interface(params_set, gui=gui)
     elif source == "local":
-        if "met_filename" not in kwargs.keys():
+        if "met_filename" not in kwargs:
             raise RuntimeError(
-                "In met_set, 'met_filename' must be given if source='local'"
+                "In set_met, 'met_filename' must be given if source='local'"
             )
-        met_filename = kwargs["met_filename"]
-        met_set = _get_local_netcdf_met(
-            met_filename, params_set.source.latitude, params_set.source.longitude
+        if "datetime" not in kwargs:
+            raise RuntimeError(
+                "In set_met, 'datetime' must be given if source='local'"
+            )
+        met_datetime = string_to_datetime(kwargs["datetime"])
+        met_nc = _get_local_netcdf_met(kwargs["met_filename"])
+        met_set = _extract_local_netcdf_met(
+            met_nc,
+            params_set.source.latitude,
+            params_set.source.longitude,
+            met_datetime,
         )
     elif source == "gfs":
-        if "datetime" not in kwargs.keys():
-            raise RuntimeError("In met_set, 'date' must be given if source='gfs'")
-        date = kwargs["datetime"]
-        met_datetime = string_to_datetime(date)
+        if "datetime" not in kwargs:
+            raise RuntimeError("In set_met, 'datetime' must be given if source='gfs'")
+        met_datetime = string_to_datetime(kwargs["datetime"])
         met_set = _get_gfs_met(
             params_set.source.latitude, params_set.source.longitude, met_datetime
         )
     elif source == "ecmwf":
-        if "datetime" not in kwargs.keys():
-            raise RuntimeError("In met_set, 'date' must be given if source='ecmwf'")
-        date = kwargs["datetime"]
-        met_datetime = string_to_datetime(date)
-        if "met_filename" in kwargs.items():
-            met_filename = kwargs["met_filename"]
-        else:
-            met_filename = "./MetData/era5_download.nc"
+        if "datetime" not in kwargs:
+            raise RuntimeError("In set_met, 'datetime' must be given if source='ecmwf'")
+        met_datetime = string_to_datetime(kwargs["datetime"])
+        met_filename = kwargs.get("met_filename") or "./MetData/era5_download.nc"
         met_set = _get_ecmwf_met(
             params_set.source.latitude,
             params_set.source.longitude,
             met_datetime,
             met_filename=met_filename,
+        )
+    else:
+        raise ValueError(
+            f"In set_met, unknown source '{source}'; "
+            "must be one of 'interface', 'local', 'gfs', 'ecmwf'"
         )
 
     # params_set = _set_met_parameters(params_set, met_set)
