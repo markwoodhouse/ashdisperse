@@ -1590,67 +1590,50 @@ class AshDisperseResult:
         return ds
     
 
-    # def _raster_contour(self, raster, name, cntrs):
+    @staticmethod
+    def _raster_contour(
+        raster: xa.DataArray, name: str, levels: NDArray[np.float64] | list[float]
+    ) -> gpd.GeoDataFrame:
+        """Polygonize a georeferenced raster into filled contour bands.
 
-    #     data = raster.data
-    #     x = raster.x.data
-    #     y = raster.y.data
-    #     crs = raster.rio.crs
+        Each row of the returned GeoDataFrame is the (multi)polygon where
+        ``levels[k] <= value < levels[k+1]`` (the last band is unbounded
+        above), so the bands do not overlap and holes are preserved.
 
-    #     data_min = np.nanmin(data)
-    #     data_max = np.nanmax(data)
-    #     data_max = nice_round_up(data_max, mag=10 ** np.floor(np.log10(data_max)))
+        Args:
+            raster: 2D DataArray with rio transform and CRS.
+            name: value stored in the ``name`` column of every row.
+            levels: increasing contour levels.
 
-    #     fx = interp1d(np.arange(0, len(x)), x)
-    #     fy = interp1d(np.arange(0, len(y)), y)
+        Returns:
+            GeoDataFrame with columns ``contour`` (lower bound of the band),
+            ``name`` and ``geometry``, in the raster's CRS.
+        """
+        from rasterio.features import shapes
+        from shapely.geometry import shape
+        from shapely.ops import unary_union
 
-    #     cntrs = cntrs[cntrs > data_min]
-    #     cntrs = cntrs[cntrs < data_max]
+        crs = raster.rio.crs
+        data = np.asarray(raster.values, dtype=np.float64)
+        levels = np.sort(np.asarray(levels, dtype=np.float64))
 
-    #     for kk, this_cntr in enumerate(cntrs):
+        band = np.digitize(np.nan_to_num(data, nan=-np.inf), levels).astype(np.int32)
 
-    #         C = find_contours(data, this_cntr)
+        polys: dict[int, list[BaseGeometry]] = {}
+        for geom, value in shapes(
+            band, mask=band > 0, transform=raster.rio.transform()
+        ):
+            polys.setdefault(int(value), []).append(shape(geom))
 
-    #         if len(C) == 0:
-    #             pass
-    #         for jj, p in enumerate(C):
-    #             p[:, 0] = fy(p[:, 0])
-    #             p[:, 1] = fx(p[:, 1])
-
-    #             p[:, [0, 1]] = p[:, [1, 0]]
-
-    #             if len(p[:, 1]) > 2:
-    #                 thisPoly = Polygon(p).buffer(0)
-    #                 if not thisPoly.is_empty:
-    #                     if jj == 0:
-    #                         geom = thisPoly
-    #                         g_tmp = gpd.GeoDataFrame(
-    #                             columns=["contour", "name", "geometry"], crs=crs
-    #                         )
-    #                         g_tmp.loc[0, "contour"] = this_cntr
-    #                         g_tmp.loc[[0], "geometry"] = gpd.GeoSeries([geom])
-    #                         g_tmp.loc[0, "name"] = name
-    #                     else:
-    #                         if g_tmp.loc[0, "geometry"].contains(thisPoly):
-    #                             geom = g_tmp.loc[0, "geometry"].difference(thisPoly)
-    #                         else:
-    #                             try:
-    #                                 geom = g_tmp.loc[0, "geometry"].union(thisPoly)
-    #                             except:
-    #                                 print(
-    #                                     "Error processing polygon contour -- skipping.  Better check the result!"
-    #                                 )
-    #                         g_tmp.loc[[0], "geometry"] = gpd.GeoSeries([geom])
-
-    #         if kk == 0:
-    #             g = gpd.GeoDataFrame(g_tmp).set_geometry("geometry")
-    #         else:
-    #             g = gpd.GeoDataFrame(pd.concat([g, g_tmp], ignore_index=True))
-
-    #     g["contour"] = g["contour"].astype("float64")
-    #     g.crs = crs
-
-    #     return g
+        rows = sorted(polys)
+        return gpd.GeoDataFrame(
+            {
+                "contour": np.array([levels[k - 1] for k in rows], dtype=np.float64),
+                "name": [name] * len(rows),
+            },
+            geometry=[unary_union(polys[k]) for k in rows],
+            crs=crs,
+        )
 
     def write_gtiff(self,
                     raster: NDArray[np.float64], 
@@ -1969,72 +1952,40 @@ class AshDisperseResult:
     def contour_settling_flux(self, grain_i, logscale=True, vmin=1e-6):
 
         self._check_valid_grain(grain_i)
-        data = self.SettlingFlux[:, :, grain_i]
-        vmax = np.nanmax(data)
-        mag = np.log10(vmax)
-        if mag > 0:
-            mag = ceil(mag)
-        else:
-            mag = floor(mag)
-        vmax = nice_round_up(vmax, mag=10**mag)
 
-        fx = interp1d(np.arange(0, len(self.x)), self.x[:, grain_i] + self.utm[0])
-        fy = interp1d(np.arange(0, len(self.y)), self.y[:, grain_i] + self.utm[1])
+        empty = gpd.GeoDataFrame(
+            {
+                "SettlingFlux": np.array([], dtype=np.float64),
+                "GrainClass": np.array([], dtype=np.int64),
+                "GrainSize": np.array([], dtype=np.float64),
+            },
+            geometry=gpd.GeoSeries([], crs=self.params.source.utmcode),
+            crs=self.params.source.utmcode,
+        )
+
+        ds = self.raster_settlingflux_for_grain_class(grain_i, vmin=vmin)
+        if ds is None:
+            return empty
+
+        data_max = float(np.nanmax(ds["settling_flux"].values))
+        if not np.isfinite(data_max) or data_max <= vmin:
+            return empty
+        _, vmax = _auto_vmin_vmax(data_max)
 
         if logscale:
             levels = log_levels(vmin, vmax)
         else:
             levels = lin_levels(vmin, vmax)
 
-        g = None
-        for level in levels:
-            C = find_contours(data, level)
+        g = self._raster_contour(
+            ds["settling_flux"], str(self.params.grains.diameter[grain_i]), levels
+        )
+        g = g.rename(columns={"contour": "SettlingFlux"}).drop(columns="name")
+        g["GrainClass"] = np.int64(grain_i)
+        g["GrainSize"] = float(self.params.grains.diameter[grain_i])
+        g = g.to_crs(self.params.source.utmcode)
 
-            if len(C) > 0:
-                for jj, p in enumerate(C):
-                    pxy = np.zeros_like(p)
-                    px = fx(p[:, 1])
-                    py = fy(p[:, 0])
-                    pxy[:, 0] = px
-                    pxy[:, 1] = py
-
-                    this_poly = Polygon(pxy)
-                    if not this_poly.is_empty:
-                        if jj == 0:
-                            geom = this_poly
-                            g_tmp = gpd.GeoDataFrame(
-                                {
-                                    "SettlingFlux": [level],
-                                    "GrainClass": [grain_i],
-                                    "GrainSize": [self.params.grains.diameter[grain_i]],
-                                },
-                                geometry = [geom],
-                                crs=self.params.source.utmcode,
-                            )
-                        else:
-                            current_geom = cast(BaseGeometry, g_tmp.geometry.iloc[0])
-                            if current_geom.contains(this_poly):
-                                geom = current_geom.difference(this_poly)
-                            else:
-                                geom = current_geom.union(this_poly)
-                            g_tmp.set_geometry(gpd.GeoSeries([geom], crs=g_tmp.crs), inplace=True)
-
-            if g is None:
-                g = gpd.GeoDataFrame(g_tmp).set_geometry("geometry")
-            else:
-                g = gpd.GeoDataFrame(concat([g, g_tmp], ignore_index=True))
-
-        if g is not None:
-            g["SettlingFlux"] = g["SettlingFlux"].astype("float64")
-            g["GrainClass"] = g["GrainClass"].astype("int64")
-        else:
-            # Handle the "no geometry produced" case
-            g = gpd.GeoDataFrame(
-                columns=["SettlingFlux", "GrainClass", "GrainSize", "geometry"],
-                geometry="geometry",
-                crs=self.params.source.utmcode)
-
-        return g
+        return g[["SettlingFlux", "GrainClass", "GrainSize", "geometry"]]
 
     def plot_settling_flux_for_grain_class(
         self,
