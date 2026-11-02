@@ -27,7 +27,7 @@ Vel_spec["dWs"] = float64[:, :, :, ::1]
 Vel_spec["ell"] = float64[::1]  # upper-domain map scale for each grain class
 Vel_spec["Cheb_upper"] = complex128[:, :, ::1]  # (grain, output z > H, maxN)
 # Lower-domain spectral elements (see element_breakpoints)
-Vel_spec["n_el"] = int64[::1]  # number of lower-domain elements per grain (1 or 3)
+Vel_spec["n_el"] = int64[::1]  # number of lower-domain elements per grain (1 if element_factor == 0, else 3)
 Vel_spec["bps"] = float64[:, ::1]  # (grain, 4) element breakpoints in z/H
 # coefficients at element nodes: (maxN, element, level, grain)
 Vel_spec["el_z"] = float64[:, :, :, ::1]  # z/H
@@ -36,8 +36,8 @@ Vel_spec["el_V"] = float64[:, :, :, ::1]
 Vel_spec["el_Ws"] = float64[:, :, :, ::1]
 Vel_spec["el_dWs"] = float64[:, :, :, ::1]  # d Ws / d(z/H)
 
-# Elements are used only if the layer element is thinner than this (z/H).
-ELEMENT_MAX_FRACTION = 0.1
+# Largest layer-element thickness (z/H); fine grains are split into thirds.
+ELEMENT_MAX_FRACTION = 1.0 / 3.0
 
 
 @njit(cache=True)
@@ -61,16 +61,19 @@ def settling_lengths(parameters, Ws_H):
 def element_breakpoints(parameters, delta):
     """Lower-domain element layout per grain: (n_el, breakpoints).
 
-    With eta = element_factor * delta < ELEMENT_MAX_FRACTION the lower domain
-    is split at z/H = eta and 1 - eta, so the thin layers at the ground and
-    below the plume top lie in their own elements.  Otherwise one element."""
+    With element_factor > 0 the lower domain is split into three elements
+    at z/H = eta and 1 - eta, eta = min(element_factor * delta,
+    ELEMENT_MAX_FRACTION).  For coarse grains eta is small and the thin
+    layers at the ground and below the plume top lie in their own elements;
+    for fine grains the equal split still pays, because the dense solve
+    cost grows as N^3.  element_factor = 0 gives a single element."""
     bins = parameters.grains.bins
     n_el = np.ones(bins, dtype=np.int64)
     bps = np.zeros((bins, 4), dtype=np.float64)
     c = parameters.solver.element_factor
     for ig in range(bins):
-        eta = c * delta[ig]
-        if c > 0 and eta < ELEMENT_MAX_FRACTION:
+        if c > 0:
+            eta = min(c * delta[ig], ELEMENT_MAX_FRACTION)
             n_el[ig] = 3
             bps[ig, 1] = eta
             bps[ig, 2] = 1.0 - eta

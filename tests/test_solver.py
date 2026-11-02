@@ -8,7 +8,7 @@ from ashdisperse.met.met import MetData
 from ashdisperse.params.params import parameters_from_dict
 
 
-def _params(Nx_log2=5, Ny_log2=5, fft_tol=1e-10, **solver):
+def _params(Nx_log2=5, Ny_log2=5, fft_tol=1e-10, grains=None, **solver):
     d = {
         "source": dict(name="test", latitude=63.983, longitude=-19.666, utmcode=32627,
                        radius=10000.0, PlumeHeight=10000.0, MER=1e6, duration=18000.0),
@@ -22,6 +22,8 @@ def _params(Nx_log2=5, Ny_log2=5, fft_tol=1e-10, **solver):
         "output": dict(start=0.0, stop=11000.0, step=1100.0),
     }
     d["solver"].update(solver)
+    if grains:
+        d["grains"].update(grains)
     return parameters_from_dict(d)
 
 
@@ -113,6 +115,22 @@ def test_lower_elements_match_single_domain_reference(met):
     for k in range(2):
         scale = np.abs(ref.C0_FT[..., k]).max()
         assert np.max(np.abs(el.C0_FT[..., k] - ref.C0_FT[..., k])) < 1e-8 * scale
+    assert np.max(np.abs(el.Cz_FT - ref.Cz_FT)) < 1e-7 * np.abs(ref.Cz_FT).max()
+
+
+def test_fine_grain_elements_split_into_thirds(met):
+    # 30 um grains have no thin layers; their lower domain is split into
+    # thirds, and must agree with a tightly converged single-domain solve.
+    set_num_threads(2)
+    g = dict(diameter=[3e-5, 3e-5], density=[2400.0, 2400.0])
+    el = ad.solve(_params(grains=g), met)
+    from ashdisperse.containers import ChebContainer, VelocityContainer
+    vel = VelocityContainer(el.params, met, ChebContainer(el.params).x)
+    assert np.all(vel.n_el == 3)
+    assert np.allclose(vel.bps[:, 1], 1.0 / 3.0) and np.allclose(vel.bps[:, 2], 2.0 / 3.0)
+    ref = ad.solve(_params(grains=g, maxN_log2=9, epsilon=1e-12, element_factor=0.0), met)
+    scale = np.abs(ref.C0_FT[..., 0]).max()
+    assert np.max(np.abs(el.C0_FT[..., 0] - ref.C0_FT[..., 0])) < 1e-8 * scale
     assert np.max(np.abs(el.Cz_FT - ref.Cz_FT)) < 1e-7 * np.abs(ref.Cz_FT).max()
 
 
