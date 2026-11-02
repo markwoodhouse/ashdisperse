@@ -2389,11 +2389,13 @@ class AshDisperseResult:
         plt.close(cbar_fig)
 
         if basemap:
-            ax = add_opentopo_basemap(ax, zorder=0)
-            (Narrow, ntext) = add_north_arrow(ax, zorder=11, fontsize=16)
-            (scalebar, sbframe) = add_scale_bar(ax, segments=1)
+            warnings.warn(
+                "plot_conc_for_grain_class: basemap is not supported for the "
+                "concentration panels (axes are in km from the vent) and is ignored",
+                stacklevel=2,
+            )
 
-        return (fig, ax, cbar)
+        return (fig, axes, cbar)
 
     def plot_iso_conc_for_grain_class(self, grain_i, conc):
         self._check_valid_grain(grain_i)
