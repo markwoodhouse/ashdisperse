@@ -1,3 +1,6 @@
+import numpy as np
+from numpy.typing import NDArray
+
 class SolverParameters:
     meps: float
     domX: float
@@ -9,6 +12,11 @@ class SolverParameters:
     epsilon: float
     plateau_factor: float
     fft_tol: float
+    met_cheb_N: int
+    z_top: float
+    upper_map_factor: float
+    element_factor: float
+    grain_N_log2: NDArray[np.int64]
 
     def __init__(
         self,
@@ -21,6 +29,10 @@ class SolverParameters:
         epsilon: float=1e-8,
         plateau_factor: float=10.0,
         fft_tol: float=1e-10,
+        met_cheb_N: int=33,
+        z_top: float=50e3,
+        upper_map_factor: float=10.0,
+        element_factor: float=30.0,
     ): ...
 
     def validate(self) -> int: ...
@@ -39,5 +51,11 @@ class SolverParameters:
     
     @property
     def chebIts(self) -> int: ...
+
+    def set_grain_N_log2(self, n_log2: list[int]) -> None: ...
+
+    def grain_Nx(self, grain_i: int) -> int: ...
+
+    def grain_Ny(self, grain_i: int) -> int: ...
 
     def describe(self): ...

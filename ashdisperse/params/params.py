@@ -64,6 +64,8 @@ class Parameters:
         _ = self.grains.validate()
         _ = self.emission.validate()
         _ = self.solver.validate()
+        if self.solver.grain_N_log2.size > 0 and self.solver.grain_N_log2.size != self.grains.bins:
+            raise ValueError("solver.grain_N_log2 must have one entry per grain class")
         _ = self.physical.validate()
         _ = self.met.validate()
         _ = self.output.validate()
@@ -117,9 +119,14 @@ def copy_parameters(A):
         epsilon=A.solver.epsilon,
         plateau_factor=A.solver.plateau_factor,
         fft_tol=A.solver.fft_tol,
+        met_cheb_N=A.solver.met_cheb_N,
+        z_top=A.solver.z_top,
+        upper_map_factor=A.solver.upper_map_factor,
+        element_factor=A.solver.element_factor,
         Nx_log2=A.solver.Nx_log2,
         Ny_log2=A.solver.Ny_log2,
     )
+    new_A.solver.set_grain_N_log2(np.array(A.solver.grain_N_log2, dtype=np.int64))
     new_A.physical = PhysicalParameters(
         A.physical.Kappa_h, A.physical.Kappa_v, A.physical.g, A.physical.mu
     )
@@ -157,6 +164,11 @@ def update_parameters(
     epsilon=None,
     plateau_factor=None,
     fft_tol=None,
+    met_cheb_N=None,
+    z_top=None,
+    upper_map_factor=None,
+    element_factor=None,
+    grain_N_log2=None,
     Nx_log2=None,
     Ny_log2=None,
     grains=None,
@@ -191,6 +203,16 @@ def update_parameters(
         A.solver.epsilon = epsilon
     if fft_tol is not None:
         A.solver.fft_tol = fft_tol
+    if met_cheb_N is not None:
+        A.solver.met_cheb_N = met_cheb_N
+    if z_top is not None:
+        A.solver.z_top = z_top
+    if upper_map_factor is not None:
+        A.solver.upper_map_factor = upper_map_factor
+    if element_factor is not None:
+        A.solver.element_factor = element_factor
+    if grain_N_log2 is not None:
+        A.solver.set_grain_N_log2(np.array(grain_N_log2, dtype=np.int64))
     if Nx_log2 is not None:
         A.solver.Nx_log2 = Nx_log2
     if Ny_log2 is not None:
@@ -447,11 +469,19 @@ def parameters_from_dict(paramset: dict) -> Parameters:
         epsilon=paramset["solver"]["epsilon"],
         plateau_factor=paramset["solver"]["plateau_factor"],
         fft_tol=paramset["solver"]["fft_tol"],
+        met_cheb_N=paramset["solver"].get("met_cheb_N", 33),
+        z_top=paramset["solver"].get("z_top", 50e3),
+        upper_map_factor=paramset["solver"].get("upper_map_factor", 10.0),
+        element_factor=paramset["solver"].get("element_factor", 30.0),
         Nx_log2=paramset["solver"]["Nx_log2"],
         Ny_log2=paramset["solver"]["Ny_log2"],
     )
 
     
+    gn = paramset["solver"].get("grain_N_log2", [])
+    if len(gn) > 0:
+        params.solver.set_grain_N_log2(np.array(gn, dtype=np.int64))
+
     params.physical = PhysicalParameters(
         Kappa_h=paramset["physical"]["Kappa_h"],
         Kappa_v=paramset["physical"]["Kappa_v"],

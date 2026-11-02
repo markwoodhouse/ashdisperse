@@ -35,8 +35,77 @@ from ashdisperse.params import Parameters_type
 #     return conc_0_ft, conc_z_ft
 
 
+@njit(complex128(complex128[::1], float64), cache=True)
+def _cheb_val(c, x):
+    """Clenshaw evaluation of a complex Chebyshev series at x."""
+    b1 = 0.0 + 0.0j
+    b2 = 0.0 + 0.0j
+    for k in range(c.size - 1, 0, -1):
+        b0 = 2.0 * x * b1 - b2 + c[k]
+        b2 = b1
+        b1 = b0
+    return x * b1 - b2 + c[0]
+
+
+# Minimum element resolution: with fewer points the chop test can accept
+# series that are not yet resolved (seen as ~1e-6 errors in testing).
+_ELEMENT_MIN_N = 64
+
+
 @njit(
-    Tuple((complex128, complex128[::1]))(
+    Tuple((complex128, complex128[::1], int64, int64))(
+        int64, float64, float64, complex128,
+        ChebContainer_type, Parameters_type, VelocityContainer_type,
+        int64, int64,
+    ),
+    cache=True,
+)
+def _mode_solve_elements(grain_i, kx, ky, fxy_ij, cheby, parameters, vel, k_lower, k_upper):
+    """Solve one Fourier mode with a spectral-element lower domain."""
+    z = parameters.output.altitudes / parameters.source.PlumeHeight
+    Nlow = 0
+    for iz in range(z.size):
+        if z[iz] <= 1:
+            Nlow += 1
+    conc_z_ft = np.zeros(z.size, dtype=np.complex128)
+
+    l2_c, k_up = core.UpperODE_from(kx, ky, grain_i, cheby, parameters, vel, k_upper)
+    ell = vel.ell[grain_i]
+    upper_flux = (2.0 / ell) * cheb.cheb_dif_m1(l2_c)
+
+    k0 = cheby.N.size - 1
+    for k in range(cheby.N.size):
+        if cheby.N[k] >= _ELEMENT_MIN_N:
+            k0 = k
+            break
+    if k_lower > k0:
+        k0 = k_lower
+
+    comb, sizes, Vv, k_lo = core.LowerElements(
+        kx, ky, fxy_ij, grain_i, cheby, parameters, vel, k0, upper_flux
+    )
+    E = vel.n_el[grain_i]
+
+    conc_0_ft = cheb.cheb_val_m1(np.ascontiguousarray(comb[0, : sizes[0]]))
+    for iz in range(Nlow):
+        e = 0
+        while e < E - 1 and z[iz] > vel.bps[grain_i, e + 1]:
+            e += 1
+        za = vel.bps[grain_i, e]
+        zb = vel.bps[grain_i, e + 1]
+        xe = 2.0 * (z[iz] - za) / (zb - za) - 1.0
+        conc_z_ft[iz] = _cheb_val(np.ascontiguousarray(comb[e, : sizes[e]]), xe)
+    for iz in range(z.size - Nlow):
+        l2_v = 0.0 + 0.0j
+        for n in range(l2_c.size):
+            l2_v += vel.Cheb_upper[grain_i, iz, n] * l2_c[n]
+        conc_z_ft[Nlow + iz] = Vv[E - 1] * l2_v
+
+    return conc_0_ft, conc_z_ft, k_lo, k_up
+
+
+@njit(
+    Tuple((complex128, complex128[::1], int64, int64))(
         int64,
         float64,
         float64,
@@ -44,12 +113,21 @@ from ashdisperse.params import Parameters_type
         ChebContainer_type,
         Parameters_type,
         VelocityContainer_type,
+        int64,
+        int64,
     ),
     cache=True,
     parallel=False,
     fastmath=False,
 )
-def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, VelocityContainer):
+def ade_mode_solve_grain_from(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, VelocityContainer, k_lower, k_upper):
+    """Solve one Fourier mode, starting the Chebyshev ladders at the given
+    levels.  Returns surface value, profile, and the levels used."""
+
+    if VelocityContainer.n_el[grain_i] > 1:
+        return _mode_solve_elements(
+            grain_i, kx, ky, fxy_ij, ChebContainer, parameters, VelocityContainer, k_lower, k_upper
+        )
 
     z = np.zeros((parameters.output.Nz), dtype=np.float64)
     z = parameters.output.altitudes
@@ -66,7 +144,7 @@ def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, Vel
     #   note, other homogeneous part (called l1) with bcs l1'(-1) = 0, l1(1) = 0 has trivial solution l1==0
     #   with _c for coefficients, _v for values)
     
-    p1_c, r1_c = core.LowerODE(
+    p1_c, r1_c, k_lo = core.LowerODE_from(
         kx,
         ky,
         fxy_ij,
@@ -74,6 +152,7 @@ def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, Vel
         ChebContainer,
         parameters,
         VelocityContainer,
+        k_lower,
     )
 
     # Lower domain solution:
@@ -93,8 +172,8 @@ def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, Vel
     #       inhomogeneous part (called p2) with null boundary conditions
     #       homogeneous part (called r2) with bcs r2(1) = 1, r2(-1) = 0
     #       with _c for coefficients, _v for values)
-    l2_c = core.UpperODE(
-        kx, ky, grain_i, ChebContainer, parameters, VelocityContainer
+    l2_c, k_up = core.UpperODE_from(
+        kx, ky, grain_i, ChebContainer, parameters, VelocityContainer, k_upper
     )
 
     # Upper domain solution:
@@ -102,38 +181,153 @@ def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, Vel
     # for matching to lower domain
     dl2_m1 = cheb.cheb_dif_m1(l2_c)
 
-    a = dp1_p1/(dl2_m1-dr1_p1)
+    # Flux continuity at z = H.  d/dz = 2 d/dx below and (2/ell) d/dx above.
+    ell = VelocityContainer.ell[grain_i]
+    a = dp1_p1 / (dl2_m1 / ell - dr1_p1)
 
-    Cheb_r1 = np.zeros(
-        (parameters.output.Cheb_lower.shape[0], r1_c.size), dtype=np.complex128
-    )
-    Cheb_p1 = np.zeros(
-        (parameters.output.Cheb_lower.shape[0], p1_c.size), dtype=np.complex128
-    )
+    # Evaluate the series at the output altitudes directly from the stored
+    # Chebyshev matrices (no per-mode zero-padded copies).
+    T_low = parameters.output.Cheb_lower
+    for iz in range(Nlow):
+        p1_v = 0.0 + 0.0j
+        for n in range(p1_c.size):
+            p1_v += T_low[iz, n] * p1_c[n]
+        r1_v = 0.0 + 0.0j
+        for n in range(r1_c.size):
+            r1_v += T_low[iz, n] * r1_c[n]
+        conc_z_ft[iz] = p1_v + a * r1_v
 
-    Cheb_r1[:, : r1_c.size] = parameters.output.Cheb_lower[:, : r1_c.size]
-    Cheb_p1[:, : p1_c.size] = parameters.output.Cheb_lower[:, : p1_c.size]
-
-    r1_v = Cheb_r1 @ r1_c
-    p1_v = Cheb_p1 @ p1_c
-
-    conc_z_ft[:Nlow] = p1_v + a * r1_v
-
-    Cheb_l2 = np.zeros(
-        (parameters.output.Cheb_upper.shape[0], l2_c.size), dtype=np.complex128
-    )
-    Cheb_l2[:, : l2_c.size] = parameters.output.Cheb_upper[:, : l2_c.size]
-    l2_v = Cheb_l2 @ l2_c
-
-    conc_z_ft[Nlow:] = a * l2_v
+    for iz in range(z.size - Nlow):
+        l2_v = 0.0 + 0.0j
+        for n in range(l2_c.size):
+            l2_v += VelocityContainer.Cheb_upper[grain_i, iz, n] * l2_c[n]
+        conc_z_ft[Nlow + iz] = a * l2_v
 
     conc_0_ft = p1_m1 + a*r1_m1 # Evaluate lower solution on Z=0 <=> x=-1
 
-    return conc_0_ft, conc_z_ft
+    return conc_0_ft, conc_z_ft, k_lo, k_up
 
 
 @njit(
-    Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1]))(
+    Tuple((complex128, complex128[::1]))(
+        int64, float64, float64, complex128,
+        ChebContainer_type, Parameters_type, VelocityContainer_type,
+    ),
+    cache=True,
+)
+def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, VelocityContainer):
+    """Solve one Fourier mode with the full Chebyshev ladder."""
+    c0, cz, _, _ = ade_mode_solve_grain_from(
+        grain_i, kx, ky, fxy_ij, ChebContainer, parameters, VelocityContainer, 0, 0
+    )
+    return c0, cz
+
+
+@njit(int64(int64[:, :, ::1], int64, int64, int64, int64), cache=True)
+def _start_level(lev, j, i, k, Ny):
+    """Starting Chebyshev level for interior mode (j, i): the lowest level
+    that the neighbouring axis modes (same ky on kx = 0, same kx on the
+    ky = 0 / ky = -1 rows) needed.  The axis modes are solved first, so the
+    choice is deterministic."""
+    s = lev[j, 0, k]
+    if lev[0, i, k] < s:
+        s = lev[0, i, k]
+    if lev[Ny - 1, i, k] < s:
+        s = lev[Ny - 1, i, k]
+    return s
+
+
+@njit(
+    Tuple((int64[::1], int64[::1]))(Parameters_type, int64),
+    cache=True,
+)
+def _grain_caps(params, Ng):
+    """Largest mode indices solved for each grain class.
+
+    A grain with resolution Ng_x x Ng_y (params.solver.grain_Nx/grain_Ny,
+    the global grid unless solver.grain_N_log2 is set) keeps kx index
+    i <= Ng_x / 2 and ky pair index j <= Ng_y / 2 - 1, i.e. the rows
+    0 .. Ng_y/2 - 1 and Ny - Ng_y/2 .. Ny - 1: exactly the modes of an
+    Ng_x x Ng_y grid.  Each mode is an independent vertical solve with an
+    exact source coefficient, so this equals solving the grain on its own
+    grid and interpolating it to the global grid by zero-padding, except in
+    the Nyquist column i = Ng_x / 2, which the grain's own grid solves at
+    kx = -Ng_x/2 (grid_freq) and the global grid at +Ng_x/2.
+    """
+    capX = np.empty(Ng, dtype=np.int64)
+    capY = np.empty(Ng, dtype=np.int64)
+    for k in range(Ng):
+        capX[k] = params.solver.grain_Nx(k) // 2
+        capY[k] = params.solver.grain_Ny(k) // 2 - 1
+    return capX, capY
+
+
+@njit(
+    Tuple((int64[::1], int64[::1], int64[::1]))(int64, int64),
+    cache=True,
+)
+def _axis_modes(Nx, Ny):
+    """Fourier modes on the kx = 0 and ky = 0 axes of the rfft layout.
+
+    Returns (i, j, line) with line = 0 for the i = 0 column (all j) and
+    line = 1 for the j = 0 and j = Ny - 1 rows (i >= 1).  These rows are the
+    two members of the j = 0 pair (j, Ny - 1 - j) used in the interior loop.
+    """
+    half_Nx = Nx // 2
+    n = Ny + 2 * half_Nx
+    ii = np.empty(n, dtype=np.int64)
+    jj = np.empty(n, dtype=np.int64)
+    line = np.empty(n, dtype=np.int64)
+    m = 0
+    for j in range(Ny):
+        ii[m] = 0
+        jj[m] = j
+        line[m] = 0
+        m += 1
+    for i in range(1, half_Nx + 1):
+        ii[m] = i
+        jj[m] = 0
+        line[m] = 1
+        m += 1
+        ii[m] = i
+        jj[m] = Ny - 1
+        line[m] = 1
+        m += 1
+    return ii, jj, line
+
+
+@njit(
+    Tuple((int64[::1], int64[::1]))(complex128[:, :, ::1], float64, int64, int64),
+    cache=True,
+)
+def _adaptive_stops(conc_0_fft, fft_tol, Nx, Ny):
+    """Truncation indices from the axis modes (computed beforehand).
+
+    Ystop[k]: first j along kx = 0 where the pair (j, Ny - 1 - j) is below
+    fft_tol.  Xstop[k]: first i along ky = 0 with 0 < |C| < fft_tol.  These
+    are the rules of the original single-pass loop, applied once all axis
+    modes are known, so the result does not depend on thread scheduling.
+    """
+    Ng = conc_0_fft.shape[2]
+    half_Ny = (Ny + 1) // 2
+    Xstop = (Nx // 2 + 1) * np.ones(Ng, dtype=np.int64)
+    Ystop = Ny // 2 * np.ones(Ng, dtype=np.int64)
+    for k in range(Ng):
+        for j in range(half_Ny):
+            j_upper = Ny - j - 1
+            if np.abs(conc_0_fft[j, 0, k]) < fft_tol and np.abs(conc_0_fft[j_upper, 0, k]) < fft_tol:
+                Ystop[k] = j
+                break
+        for i in range(Nx // 2 + 1):
+            a = np.abs(conc_0_fft[0, i, k])
+            if 0.0 < a < fft_tol:
+                Xstop[k] = i
+                break
+    return Xstop, Ystop
+
+
+@njit(
+    Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1], boolean[:, :, ::1]))(
         float64[::1],
         float64[::1],
         complex128[:, :, ::1],
@@ -146,14 +340,22 @@ def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, Vel
     fastmath=False,
 )
 def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
+    """Solve every retained Fourier mode for every grain class.
 
+    Two parallel passes make the result independent of thread scheduling:
+      1. modes on the kx = 0 and ky = 0 axes, which set the adaptive
+         truncation indices Xstop/Ystop (per grain);
+      2. interior modes, skipped beyond the truncation indices.
+
+    Returns the ground and level coefficients and a mask (Ny, Nx/2+1, Ng)
+    of modes whose vertical solve did not converge at the largest
+    Chebyshev N.
+    """
     Nx = kx.size
     Ny = ky.size
 
     Ng = params.grains.bins
     Nz = params.output.Nz
-
-    zeros_Nz = np.zeros(Nz, dtype=np.complex128)
 
     fft_tol = params.solver.fft_tol
 
@@ -162,67 +364,76 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
         (Ny, Nx//2+1, Nz, Ng), dtype=np.complex128
     )
 
-    Xstop = (Nx//2+1) * np.ones((Ng), dtype=np.int64)
-    Ystop = Ny//2 * np.ones((Ng), dtype=np.int64)
-
-    half_Ny = (Ny+1)//2
-
-    N = (Nx//2 + 1) * (half_Ny) * Ng
-    for idx in prange(N):
-        i = idx // (half_Ny * Ng)  # Compute i
-        j = (idx // Ng) % (half_Ny)  # Compute j
-        j_upper = Ny - j - 1  # Mirror j
-        #k = idx % Ng          # Compute k
-        k = Ng - 1 - (idx % Ng) # Compute k in reverse
-
-        # skip if outside current adaptive stop
-        if (i > Xstop[k]) or (j > Ystop[k]):
-            conc_0_fft[j, i, k] = 0.0 + 0.0j
-            conc_z_fft[j, i, :, k] = zeros_Nz
-            conc_0_fft[j_upper, i, k] = 0.0 + 0.0j
-            conc_z_fft[j_upper, i, :, k] = zeros_Nz
-            continue
-
-        # compute mode for (i,j)
-        conc_0_mode_fft, conc_z_mode_fft = ade_mode_solve_grain(
-            k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities
+    # Pass 1: axis modes
+    # unconv[j, i, k]: the vertical solve of this mode did not converge at
+    # the largest Chebyshev N (the ladder level returned is then N.size)
+    nlev = cheby.N.size
+    unconv = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.bool_)
+    lev_lo = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
+    lev_up = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
+    capX, capY = _grain_caps(params, Ng)
+    ai, aj, _ = _axis_modes(Nx, Ny)
+    NA = ai.size * Ng
+    for idx in prange(NA):
+        m = idx // Ng
+        k = Ng - 1 - (idx % Ng)
+        i = ai[m]
+        j = aj[m]
+        if (i > capX[k]) or (capY[k] < j < Ny - 1 - capY[k]):
+            continue  # beyond this grain's resolution
+        c0, cz, klo, kup = ade_mode_solve_grain_from(
+            k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities, 0, 0
         )
+        conc_0_fft[j, i, k] = c0
+        conc_z_fft[j, i, :, k] = cz
+        lev_lo[j, i, k] = klo
+        lev_up[j, i, k] = kup
+        unconv[j, i, k] = (klo >= nlev) or (kup >= nlev)
 
-        conc_0_fft[j, i, k] = conc_0_mode_fft
-        conc_z_fft[j, i, :, k] = conc_z_mode_fft
+    Xstop, Ystop = _adaptive_stops(conc_0_fft, fft_tol, Nx, Ny)
+    for k in range(Ng):
+        Xstop[k] = min(Xstop[k], capX[k])
+        Ystop[k] = min(Ystop[k], capY[k])
 
-        # compute mirrored mode for j_upper only if not already computed
+    # Pass 2: interior modes, in pairs (j, Ny - 1 - j) for j >= 1
+    half_Ny = (Ny + 1) // 2
+    nI = Nx // 2
+    nJ = half_Ny - 1
+    N = nI * nJ * Ng
+    for idx in prange(N):
+        i = 1 + idx // (nJ * Ng)
+        j = 1 + (idx // Ng) % nJ
+        k = Ng - 1 - (idx % Ng)  # coarse-to-fine order spreads the work
+        j_upper = Ny - j - 1
+
+        if (i > Xstop[k]) or (j > Ystop[k]):
+            continue  # arrays are zero-initialised
+
+        c0, cz, klo, kup = ade_mode_solve_grain_from(
+            k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities,
+            _start_level(lev_lo, j, i, k, Ny), _start_level(lev_up, j, i, k, Ny),
+        )
+        conc_0_fft[j, i, k] = c0
+        conc_z_fft[j, i, :, k] = cz
+        unconv[j, i, k] = (klo >= nlev) or (kup >= nlev)
+
         if j_upper != j:
-            conc_0_mode_fft_upper, conc_z_mode_fft_upper = ade_mode_solve_grain(
-                k, kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities
+            c0, cz, klo, kup = ade_mode_solve_grain_from(
+                k, kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities,
+                _start_level(lev_lo, j_upper, i, k, Ny), _start_level(lev_up, j_upper, i, k, Ny),
             )
-            conc_0_fft[j_upper, i, k] = conc_0_mode_fft_upper
-            conc_z_fft[j_upper, i, :, k] = conc_z_mode_fft_upper
-        else:
-            # diagonal (Ny odd), copy
-            conc_0_fft[j_upper, i, k] = conc_0_mode_fft
-            conc_z_fft[j_upper, i, :, k] = conc_z_mode_fft
+            conc_0_fft[j_upper, i, k] = c0
+            conc_z_fft[j_upper, i, :, k] = cz
+            unconv[j_upper, i, k] = (klo >= nlev) or (kup >= nlev)
 
-        # update adaptive stop indices based on FFT tolerance
-        if i == 0:
-            if np.abs(conc_0_mode_fft) < fft_tol:
-                if j_upper != j:
-                    if np.abs(conc_0_mode_fft_upper) < fft_tol:
-                        Ystop[k] = min(j, Ystop[k])
-                else:
-                    Ystop[k] = min(j, Ystop[k])
-
-        if j == 0:
-            if 0.0 < np.abs(conc_0_mode_fft) < fft_tol:
-                Xstop[k] = min(i, Xstop[k])
-    
-    return conc_0_fft, conc_z_fft
+    return conc_0_fft, conc_z_fft, unconv
 
 
 @njit(
-    Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1]))(
+    Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1], boolean[:, :, ::1]))(
         complex128[:, :, ::1],
         complex128[:, :, :, ::1],
+        boolean[:, :, ::1],
         float64[::1],
         float64[::1],
         complex128[:, :, ::1],
@@ -233,13 +444,20 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
     ),
     parallel=True,
     cache=True,
-    fastmath=True,
+    fastmath=False,
 )
-def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, velocities, full=False):
+def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, unconv_old, kx, ky, fxy_f, cheby, params, velocities, full=False):
+    """Solve on a finer Fourier grid, reusing modes from a previous solution.
 
+    Same two-pass structure as ade_ft_system.  Axis modes are always
+    recomputed; an interior mode (and its unconverged flag, from
+    unconv_old) is copied from the old solution when it
+    exists there and |C0| >= fft_tol (unless full=True), otherwise solved.
+    (The former moving-window predictor shared state between threads and
+    has been removed.)
+    """
     Ny_old = conc_0_fft_old.shape[0]
     half_Nx_old = conc_0_fft_old.shape[1] - 1
-    Nx_old = half_Nx_old * 2
     half_Ny_old = Ny_old // 2
 
     Nx = kx.size
@@ -249,114 +467,84 @@ def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, 
     Ng = params.grains.bins
     Nz = params.output.Nz
     fft_tol = params.solver.fft_tol
-    zeros_Nz = np.zeros(Nz, dtype=np.complex128)
-
-    Xstop = (Nx//2+1) * np.ones(Ng, dtype=np.int64)
-    Ystop = Ny//2 * np.ones(Ng, dtype=np.int64)
 
     conc_0_fft = np.zeros((Ny, half_Nx+1, Ng), dtype=np.complex128)
     conc_z_fft = np.zeros((Ny, half_Nx+1, Nz, Ng), dtype=np.complex128)
 
-    # Optional: moving-window for predictive skipping
-    window_size = 5
-    ksq_window = np.zeros((Ng, window_size), dtype=np.float64)
-    log_window = np.zeros((Ng, window_size), dtype=np.float64)
-    window_count = np.zeros(Ng, dtype=np.int64)
-    window_index = np.zeros(Ng, dtype=np.int64)
-    max_conc0 = np.zeros(Ng, dtype=np.float64)
-
-    N_total = (half_Nx+1) * half_Ny * Ng
-    for idx in prange(N_total):
-        i = idx // (half_Ny * Ng)
-        j = (idx // Ng) % half_Ny
-        j_upper = Ny - j - 1
+    # unconv[j, i, k]: the vertical solve of this mode did not converge at
+    # the largest Chebyshev N (the ladder level returned is then N.size)
+    nlev = cheby.N.size
+    unconv = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.bool_)
+    lev_lo = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
+    lev_up = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
+    capX, capY = _grain_caps(params, Ng)
+    ai, aj, _ = _axis_modes(Nx, Ny)
+    NA = ai.size * Ng
+    for idx in prange(NA):
+        m = idx // Ng
         k = Ng - 1 - (idx % Ng)
+        i = ai[m]
+        j = aj[m]
+        if (i > capX[k]) or (capY[k] < j < Ny - 1 - capY[k]):
+            continue  # beyond this grain's resolution
+        c0, cz, klo, kup = ade_mode_solve_grain_from(
+            k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities, 0, 0
+        )
+        conc_0_fft[j, i, k] = c0
+        conc_z_fft[j, i, :, k] = cz
+        lev_lo[j, i, k] = klo
+        lev_up[j, i, k] = kup
+        unconv[j, i, k] = (klo >= nlev) or (kup >= nlev)
 
+    Xstop, Ystop = _adaptive_stops(conc_0_fft, fft_tol, Nx, Ny)
+    for k in range(Ng):
+        Xstop[k] = min(Xstop[k], capX[k])
+        Ystop[k] = min(Ystop[k], capY[k])
+
+    nI = half_Nx
+    nJ = half_Ny - 1
+    N_total = nI * nJ * Ng
+    for idx in prange(N_total):
+        i = 1 + idx // (nJ * Ng)
+        j = 1 + (idx // Ng) % nJ
+        k = Ng - 1 - (idx % Ng)
+        j_upper = Ny - j - 1
         j_upper_old = Ny_old - j - 1
-        is_special = (i == 0) or (j == 0)
 
-        # Determine whether to use old solution or recompute
+        if (i > Xstop[k]) or (j > Ystop[k]):
+            continue
+
         use_old = False
-        if not full and (not is_special) and (i < half_Nx_old) and (j < half_Ny_old):
+        if (not full) and (i < half_Nx_old) and (j < half_Ny_old):
             if np.abs(conc_0_fft_old[j, i, k]) >= fft_tol:
                 use_old = True
 
         if use_old:
-            conc_0_mode_fft = conc_0_fft_old[j, i, k]
-            conc_z_mode_fft = conc_z_fft_old[j, i, :, k]
-            conc_0_mode_fft_upper = conc_0_fft_old[j_upper_old, i, k]
-            conc_z_mode_fft_upper = conc_z_fft_old[j_upper_old, i, :, k]
+            conc_0_fft[j, i, k] = conc_0_fft_old[j, i, k]
+            conc_z_fft[j, i, :, k] = conc_z_fft_old[j, i, :, k]
+            unconv[j, i, k] = unconv_old[j, i, k]
+            if j_upper != j:
+                conc_0_fft[j_upper, i, k] = conc_0_fft_old[j_upper_old, i, k]
+                conc_z_fft[j_upper, i, :, k] = conc_z_fft_old[j_upper_old, i, :, k]
+                unconv[j_upper, i, k] = unconv_old[j_upper_old, i, k]
         else:
-            # --- Predictive skip using moving window ---
-            skip_mode = False
-            if window_count[k] >= 3:
-                # Linear fit log(abs(conc)) = slope*ksq + intercept
-                n_points = window_count[k]
-                sx = 0.0
-                sy = 0.0
-                sxx = 0.0
-                sxy = 0.0
-                for w in range(n_points):
-                    idx_w = (window_index[k] - n_points + w) % window_size
-                    xw = ksq_window[k, idx_w]
-                    yw = log_window[k, idx_w]
-                    sx += xw
-                    sy += yw
-                    sxx += xw * xw
-                    sxy += xw * yw
-                denom = n_points * sxx - sx * sx
-                if denom != 0.0:
-                    slope = (n_points * sxy - sx * sy) / denom
-                    intercept = (sy - slope * sx) / n_points
-                    ksq = kx[i]**2 + ky[j]**2
-                    log_pred = slope * ksq + intercept
-                    conc_pred = np.exp(log_pred)
-                    if conc_pred < fft_tol:
-                        skip_mode = True
-
-            if skip_mode:
-                conc_0_mode_fft = 0.0 + 0.0j
-                conc_z_mode_fft = zeros_Nz
-                conc_0_mode_fft_upper = 0.0 + 0.0j
-                conc_z_mode_fft_upper = zeros_Nz
-                Xstop[k] = min(i, Xstop[k])
-                Ystop[k] = min(j, Ystop[k])
-            else:
-                # --- Recompute mode ---
-                conc_0_mode_fft, conc_z_mode_fft = ade_mode_solve_grain(
-                    k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities
+            c0, cz, klo, kup = ade_mode_solve_grain_from(
+                k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities,
+                _start_level(lev_lo, j, i, k, Ny), _start_level(lev_up, j, i, k, Ny),
+            )
+            conc_0_fft[j, i, k] = c0
+            conc_z_fft[j, i, :, k] = cz
+            unconv[j, i, k] = (klo >= nlev) or (kup >= nlev)
+            if j_upper != j:
+                c0, cz, klo, kup = ade_mode_solve_grain_from(
+                    k, kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities,
+                    _start_level(lev_lo, j_upper, i, k, Ny), _start_level(lev_up, j_upper, i, k, Ny),
                 )
-                conc_0_mode_fft_upper, conc_z_mode_fft_upper = ade_mode_solve_grain(
-                    k, kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities
-                )
+                conc_0_fft[j_upper, i, k] = c0
+                conc_z_fft[j_upper, i, :, k] = cz
+                unconv[j_upper, i, k] = (klo >= nlev) or (kup >= nlev)
 
-                # --- Update moving window ---
-                abs_mode = np.abs(conc_0_mode_fft)
-                if abs_mode > 0.0:
-                    ksq_val = kx[i]**2 + ky[j]**2
-                    window_idx = window_index[k] % window_size
-                    ksq_window[k, window_idx] = ksq_val
-                    log_window[k, window_idx] = np.log(abs_mode)
-                    window_index[k] += 1
-                    if window_count[k] < window_size:
-                        window_count[k] += 1
-                if abs_mode > max_conc0[k]:
-                    max_conc0[k] = abs_mode
-
-                # --- Update adaptive stops ---
-                if i == 0 and abs_mode < fft_tol:
-                    if np.abs(conc_0_mode_fft_upper) < fft_tol:
-                        Ystop[k] = min(j, Ystop[k])
-                if j == 0 and 0.0 < abs_mode < fft_tol:
-                    Xstop[k] = min(i, Xstop[k])
-
-        # --- Save results ---
-        conc_0_fft[j, i, k] = conc_0_mode_fft
-        conc_z_fft[j, i, :, k] = conc_z_mode_fft
-        conc_0_fft[j_upper, i, k] = conc_0_mode_fft_upper
-        conc_z_fft[j_upper, i, :, k] = conc_z_mode_fft_upper
-
-    return conc_0_fft, conc_z_fft
+    return conc_0_fft, conc_z_fft, unconv
 
 # @njit(
 #     Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1]))(

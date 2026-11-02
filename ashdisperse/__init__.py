@@ -1,6 +1,7 @@
 from importlib import resources
 
-from ashdisperse.ashdisperse import load_result, refine, setup, solve
+from ashdisperse.ashdisperse import (SolverConvergenceWarning, load_result,
+                                     refine, setup, solve)
 from ashdisperse.core import AshDisperseResult
 from ashdisperse.interface import (advected_settling_trajectories,
                                    estimate_dispersal_distance, load_inputs,
