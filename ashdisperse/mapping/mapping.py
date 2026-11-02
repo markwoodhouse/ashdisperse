@@ -83,14 +83,22 @@ def set_figure_size(fig, ax):
 
     return fig
 
-def add_basemap(ax,zoom,provider='OpenTopoMap',zorder=0):
-    valid_providers = ctx.providers.keys()
+def add_basemap(ax,zoom,provider='OpenTopoMap',style=None,zorder=0):
+    valid_providers = list(ctx.providers.keys())
     if provider not in valid_providers:
         raise ValueError("in add_basemap: provider must be one of %r." % valid_providers)
-    valid_styles = ctx.providers[provider].keys()
-    if style not in valid_styles:
-        raise ValueError("in add_basemap: style must be one of %r." % valid_styles)
-    ctx.add_basemap(ax,zoom=zoom,source=ctx.providers[provider][style],zorder=zorder)
+    source = ctx.providers[provider]
+    if style is not None:
+        valid_styles = list(source.keys())
+        if style not in valid_styles:
+            raise ValueError("in add_basemap: style must be one of %r." % valid_styles)
+        source = source[style]
+    elif "url" not in source:
+        raise ValueError(
+            "in add_basemap: provider %r requires a style, one of %r."
+            % (provider, list(source.keys()))
+        )
+    ctx.add_basemap(ax,zoom=zoom,source=source,zorder=zorder)
     return ax
 
 def add_opentopo_basemap(ax, max_zoom=13, max_tiles=256, zorder=0): 
