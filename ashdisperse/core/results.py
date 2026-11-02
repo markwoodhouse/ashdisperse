@@ -2458,6 +2458,7 @@ class AshDisperseResult:
         if isinstance(cmap, str):
             cmap = plt.get_cmap(cmap)
 
+        user_ds = ds
         if ds is None:
             ds = self.raster_total_ashload(
                 resolution=resolution, 
@@ -2469,11 +2470,21 @@ class AshDisperseResult:
             raise RuntimeError("No data in plot_ashload()")
 
         if export_gtiff:
-            arr = ds["ash_load"].values
-            x = ds.x.values
-            y = ds.y.values
-            self.write_gtiff(arr, x, y, export_name, nodata=nodata, vmin=vmin, resolution=None)
-        
+            # export in the dataset's own CRS (UTM unless a dataset was
+            # supplied); write_gtiff expects vent-relative UTM offsets and
+            # would mis-locate the Web Mercator plotting raster
+            export_ds = user_ds
+            if export_ds is None:
+                export_ds = self.raster_total_ashload(
+                    resolution=resolution, vmin=vmin / 10, nodata=nodata, crs=None
+                )
+            if export_ds is not None:
+                print(f"Writing data to {export_name}")
+                load = export_ds["ash_load"]
+                load = load.where(load >= vmin, nodata)
+                load = load.rio.write_nodata(nodata)
+                load.rio.to_raster(export_name, compress="lzw")
+
         return self._plot_banded_raster(
             ds,
             "ash_load",
