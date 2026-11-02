@@ -28,6 +28,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["OMP_SCHEDULE"] = "dynamic"
 
 import time
+import warnings
 
 import numpy as np
 from numba import parallel_chunksize
@@ -43,6 +44,36 @@ from .solver import ade_ft_refine, ade_ft_system, source_xy_dimless
 from .spectral import grid_freq
 
 set_default_threads(1)
+
+
+class SolverConvergenceWarning(UserWarning):
+    """Some vertical solves did not converge at the largest Chebyshev size."""
+
+
+def _check_convergence(result):
+    """Warn if any Fourier mode's vertical solve did not converge."""
+    counts = result.unconverged_modes
+    if counts is None or not counts.any():
+        return
+    p = result.params
+    Nmax = 2 ** p.solver.maxN_log2
+    lines = []
+    for k in np.flatnonzero(counts):
+        solved = int(np.count_nonzero(result.C0_FT[..., k]))
+        lines.append(
+            f"  grain class {k} (diameter {p.grains.diameter[k]:.3g} m): "
+            f"{counts[k]} of {solved} modes"
+        )
+    warnings.warn(
+        f"The vertical solve did not converge to epsilon = {p.solver.epsilon:g} "
+        f"at the largest Chebyshev size N = {Nmax} for:\n" + "\n".join(lines)
+        + "\nThese modes use the N = " + str(Nmax) + " solution.  Increase "
+        "maxN_log2 (or loosen epsilon), or check the grain and met parameters.  "
+        "result.converged, result.unconverged_modes and result.unconverged "
+        "(a mask over the Fourier modes) give the details.",
+        SolverConvergenceWarning,
+        stacklevel=3,
+    )
 
 
 def setup(gui=False):
@@ -76,7 +107,9 @@ def solve(parameters, met_data, timer=False, square_grid=False):
 
     Returns:
         AshDisperseResult: An AshDisperseResult object containing the model
-                           results.
+                           results.  result.converged is False (and a
+                           SolverConvergenceWarning is issued) if any
+                           vertical solve did not converge.
     """
 
     if timer:
@@ -111,14 +144,16 @@ def solve(parameters, met_data, timer=False, square_grid=False):
     # conc_z_FT = np.zeros((Ny, Nx, Nz, Ng), dtype=np.complex128)
     
     with parallel_chunksize(get_chunk_size()):
-        conc_0_FT, conc_z_FT = ade_ft_system(kx, ky, fxy_f, cheby, parameters, velocities)
+        conc_0_FT, conc_z_FT, unconverged = ade_ft_system(kx, ky, fxy_f, cheby, parameters, velocities)
 
     if timer:
         timer_end = time.time()
         print("Equation solve time : ", timer_end - timer_mid)
         print("Total solve time : ", timer_end - timer_start)
 
-    return AshDisperseResult(parameters, conc_0_FT, conc_z_FT)
+    result = AshDisperseResult(parameters, conc_0_FT, conc_z_FT, unconverged)
+    _check_convergence(result)
+    return result
 
 
 def refine(results, parameters, met_data, timer=False, full=False):
@@ -153,7 +188,15 @@ def refine(results, parameters, met_data, timer=False, full=False):
     conc_z_FT = np.zeros((Ny, Nx//2+1, Nz, Ng), dtype=np.complex128)
     
     with parallel_chunksize(get_chunk_size()):
-        conc_0_FT, conc_z_FT = ade_ft_refine(results.C0_FT, results.Cz_FT, kx, ky, fxy_f, cheby, parameters, velocities, full=full)
+        # modes copied from the old result keep its flags (treated as
+        # converged when the old result has none, e.g. an older file)
+        unconv_old = results.unconverged
+        if unconv_old is None:
+            unconv_old = np.zeros(results.C0_FT.shape, dtype=np.bool_)
+        conc_0_FT, conc_z_FT, unconverged = ade_ft_refine(
+            results.C0_FT, results.Cz_FT, np.ascontiguousarray(unconv_old),
+            kx, ky, fxy_f, cheby, parameters, velocities, full=full,
+        )
 
     if timer:
         timer_end = time.time()
@@ -161,7 +204,9 @@ def refine(results, parameters, met_data, timer=False, full=False):
         print("Total solve time : ", timer_end - timer_start)
         print("Equation solve time : ", timer_mid - timer_start)
 
-    return AshDisperseResult(parameters, conc_0_FT, conc_z_FT)
+    result = AshDisperseResult(parameters, conc_0_FT, conc_z_FT, unconverged)
+    _check_convergence(result)
+    return result
 
 
 def load_result(fname: str):

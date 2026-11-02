@@ -327,7 +327,7 @@ def _adaptive_stops(conc_0_fft, fft_tol, Nx, Ny):
 
 
 @njit(
-    Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1]))(
+    Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1], boolean[:, :, ::1]))(
         float64[::1],
         float64[::1],
         complex128[:, :, ::1],
@@ -346,6 +346,10 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
       1. modes on the kx = 0 and ky = 0 axes, which set the adaptive
          truncation indices Xstop/Ystop (per grain);
       2. interior modes, skipped beyond the truncation indices.
+
+    Returns the ground and level coefficients and a mask (Ny, Nx/2+1, Ng)
+    of modes whose vertical solve did not converge at the largest
+    Chebyshev N.
     """
     Nx = kx.size
     Ny = ky.size
@@ -361,6 +365,10 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
     )
 
     # Pass 1: axis modes
+    # unconv[j, i, k]: the vertical solve of this mode did not converge at
+    # the largest Chebyshev N (the ladder level returned is then N.size)
+    nlev = cheby.N.size
+    unconv = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.bool_)
     lev_lo = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
     lev_up = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
     capX, capY = _grain_caps(params, Ng)
@@ -380,6 +388,7 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
         conc_z_fft[j, i, :, k] = cz
         lev_lo[j, i, k] = klo
         lev_up[j, i, k] = kup
+        unconv[j, i, k] = (klo >= nlev) or (kup >= nlev)
 
     Xstop, Ystop = _adaptive_stops(conc_0_fft, fft_tol, Nx, Ny)
     for k in range(Ng):
@@ -400,28 +409,31 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
         if (i > Xstop[k]) or (j > Ystop[k]):
             continue  # arrays are zero-initialised
 
-        c0, cz, _, _ = ade_mode_solve_grain_from(
+        c0, cz, klo, kup = ade_mode_solve_grain_from(
             k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities,
             _start_level(lev_lo, j, i, k, Ny), _start_level(lev_up, j, i, k, Ny),
         )
         conc_0_fft[j, i, k] = c0
         conc_z_fft[j, i, :, k] = cz
+        unconv[j, i, k] = (klo >= nlev) or (kup >= nlev)
 
         if j_upper != j:
-            c0, cz, _, _ = ade_mode_solve_grain_from(
+            c0, cz, klo, kup = ade_mode_solve_grain_from(
                 k, kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities,
                 _start_level(lev_lo, j_upper, i, k, Ny), _start_level(lev_up, j_upper, i, k, Ny),
             )
             conc_0_fft[j_upper, i, k] = c0
             conc_z_fft[j_upper, i, :, k] = cz
+            unconv[j_upper, i, k] = (klo >= nlev) or (kup >= nlev)
 
-    return conc_0_fft, conc_z_fft
+    return conc_0_fft, conc_z_fft, unconv
 
 
 @njit(
-    Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1]))(
+    Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1], boolean[:, :, ::1]))(
         complex128[:, :, ::1],
         complex128[:, :, :, ::1],
+        boolean[:, :, ::1],
         float64[::1],
         float64[::1],
         complex128[:, :, ::1],
@@ -434,11 +446,12 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
     cache=True,
     fastmath=False,
 )
-def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, velocities, full=False):
+def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, unconv_old, kx, ky, fxy_f, cheby, params, velocities, full=False):
     """Solve on a finer Fourier grid, reusing modes from a previous solution.
 
     Same two-pass structure as ade_ft_system.  Axis modes are always
-    recomputed; an interior mode is copied from the old solution when it
+    recomputed; an interior mode (and its unconverged flag, from
+    unconv_old) is copied from the old solution when it
     exists there and |C0| >= fft_tol (unless full=True), otherwise solved.
     (The former moving-window predictor shared state between threads and
     has been removed.)
@@ -458,6 +471,10 @@ def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, 
     conc_0_fft = np.zeros((Ny, half_Nx+1, Ng), dtype=np.complex128)
     conc_z_fft = np.zeros((Ny, half_Nx+1, Nz, Ng), dtype=np.complex128)
 
+    # unconv[j, i, k]: the vertical solve of this mode did not converge at
+    # the largest Chebyshev N (the ladder level returned is then N.size)
+    nlev = cheby.N.size
+    unconv = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.bool_)
     lev_lo = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
     lev_up = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
     capX, capY = _grain_caps(params, Ng)
@@ -477,6 +494,7 @@ def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, 
         conc_z_fft[j, i, :, k] = cz
         lev_lo[j, i, k] = klo
         lev_up[j, i, k] = kup
+        unconv[j, i, k] = (klo >= nlev) or (kup >= nlev)
 
     Xstop, Ystop = _adaptive_stops(conc_0_fft, fft_tol, Nx, Ny)
     for k in range(Ng):
@@ -504,25 +522,29 @@ def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, 
         if use_old:
             conc_0_fft[j, i, k] = conc_0_fft_old[j, i, k]
             conc_z_fft[j, i, :, k] = conc_z_fft_old[j, i, :, k]
+            unconv[j, i, k] = unconv_old[j, i, k]
             if j_upper != j:
                 conc_0_fft[j_upper, i, k] = conc_0_fft_old[j_upper_old, i, k]
                 conc_z_fft[j_upper, i, :, k] = conc_z_fft_old[j_upper_old, i, :, k]
+                unconv[j_upper, i, k] = unconv_old[j_upper_old, i, k]
         else:
-            c0, cz, _, _ = ade_mode_solve_grain_from(
+            c0, cz, klo, kup = ade_mode_solve_grain_from(
                 k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities,
                 _start_level(lev_lo, j, i, k, Ny), _start_level(lev_up, j, i, k, Ny),
             )
             conc_0_fft[j, i, k] = c0
             conc_z_fft[j, i, :, k] = cz
+            unconv[j, i, k] = (klo >= nlev) or (kup >= nlev)
             if j_upper != j:
-                c0, cz, _, _ = ade_mode_solve_grain_from(
+                c0, cz, klo, kup = ade_mode_solve_grain_from(
                     k, kx[i], ky[j_upper], fxy_f[j_upper, i, k], cheby, params, velocities,
                     _start_level(lev_lo, j_upper, i, k, Ny), _start_level(lev_up, j_upper, i, k, Ny),
                 )
                 conc_0_fft[j_upper, i, k] = c0
                 conc_z_fft[j_upper, i, :, k] = cz
+                unconv[j_upper, i, k] = (klo >= nlev) or (kup >= nlev)
 
-    return conc_0_fft, conc_z_fft
+    return conc_0_fft, conc_z_fft, unconv
 
 # @njit(
 #     Tuple((complex128[:, :, ::1], complex128[:, :, :, ::1]))(

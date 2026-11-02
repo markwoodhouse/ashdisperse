@@ -66,7 +66,8 @@ def assemble_operator(c2, c1, c0, Tn, dTn, d2Tn):
 def LowerODE_from(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_start):
     """Lower-domain solve starting the Chebyshev ladder at level k_start.
 
-    Returns the particular and homogeneous coefficients and the level used.
+    Returns the particular and homogeneous coefficients and the level used;
+    the level is cheby.N.size if the largest N did not converge.
     """
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
@@ -78,7 +79,7 @@ def LowerODE_from(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_star
     kyL = ky / Ly
     kk = -pi * pi * rPe / Vratio * (kxL * kxL + kyL * kyL)
 
-    k_used = cheby.N.size - 1
+    k_used = cheby.N.size  # not converged unless the loop breaks
     for k in range(min(k_start, cheby.N.size - 1), cheby.N.size):
         N = cheby.N[k]
         x, Tn, dTn, d2Tn = cheby.get_cheb(k)
@@ -162,7 +163,8 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
 def UpperODE_from(kx, ky, grain_i, cheby, parameters, velocities, k_start):
     """Upper-domain solve starting the Chebyshev ladder at level k_start.
 
-    Returns the coefficients and the level used.
+    Returns the coefficients and the level used; the level is cheby.N.size
+    if the largest N did not converge.
     """
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
@@ -178,7 +180,7 @@ def UpperODE_from(kx, ky, grain_i, cheby, parameters, velocities, k_start):
     kyL = ky / Ly
     kk = -pi * pi * rPe / Vratio * (kxL * kxL + kyL * kyL)
 
-    k_used = cheby.N.size - 1
+    k_used = cheby.N.size  # not converged unless the loop breaks
     for k in range(min(k_start, cheby.N.size - 1), cheby.N.size):
         N = cheby.N[k]
         x, Tn, dTn, d2Tn = cheby.get_cheb(k)
@@ -336,7 +338,8 @@ def LowerElements(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_star
     does not), and only unresolved elements are refined.
 
     Returns combined coefficients (3, maxN), the number of coefficients of
-    each element, the interface values (3) and the lowest level used.
+    each element, the interface values (3) and the lowest level used; the
+    level is cheby.N.size if an element did not converge at the largest N.
     """
     pi = np.pi
     E = velocities.n_el[grain_i]
@@ -435,6 +438,7 @@ def LowerElements(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_star
 
         # combine and test convergence element by element
         any_need = False
+        failed = False
         for e in range(E):
             N = sizes[e]
             for n in range(N):
@@ -445,10 +449,13 @@ def LowerElements(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_star
             for n in range(N, maxN):
                 comb[e, n] = 0.0
             cut = standard_chop(np.abs(comb[e, :N]), eps)
-            if cut >= N and ks[e] < nlev - 1:
-                ks[e] += 1
-                need[e] = True
-                any_need = True
+            if cut >= N:
+                if ks[e] < nlev - 1:
+                    ks[e] += 1
+                    need[e] = True
+                    any_need = True
+                else:
+                    failed = True
         if not any_need:
             break
 
@@ -458,4 +465,6 @@ def LowerElements(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_star
     for e in range(E):
         if ks[e] < k_min:
             k_min = ks[e]
+    if failed:
+        k_min = nlev
     return comb, sizes, Vv, k_min

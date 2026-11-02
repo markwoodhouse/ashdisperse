@@ -219,3 +219,39 @@ def test_grain_N_log2_parameter_file_roundtrip(tmp_path):
     save_parameters(p, file=str(f))
     q = load_parameters(str(f))
     assert list(q.solver.grain_N_log2) == [5, 6]
+
+
+def test_converged_flag_set_on_normal_solve(met, recwarn):
+    set_num_threads(2)
+    r = ad.solve(_params(), met)
+    assert r.converged is True
+    assert np.array_equal(r.unconverged_modes, [0, 0])
+    assert r.unconverged.shape == r.C0_FT.shape
+    assert not any(issubclass(w.category, ad.SolverConvergenceWarning) for w in recwarn)
+
+
+def test_unconverged_modes_flagged_and_warned(met, tmp_path):
+    # N fixed at 16 cannot resolve these grains: the solver must say so
+    set_num_threads(2)
+    with pytest.warns(ad.SolverConvergenceWarning, match="did not converge"):
+        r = ad.solve(_params(minN_log2=4, maxN_log2=4), met)
+    assert r.converged is False
+    assert r.unconverged_modes.sum() > 0
+    assert r.unconverged.any()
+    # flags are only set on solved (non-zero) modes
+    assert np.all(r.C0_FT[r.unconverged] != 0)
+
+    # carried by derived results, regridding and NetCDF files
+    assert r.change_MER(2e6).converged is False
+    up = r.linear_interp(6, 6)
+    assert up.unconverged.shape == up.C0_FT.shape
+    assert up.unconverged_modes.sum() == r.unconverged_modes.sum()
+    fname = tmp_path / "r.nc"
+    r.to_netcdf(str(fname))
+    back = ad.load_result(str(fname))
+    assert np.array_equal(back.unconverged, r.unconverged)
+
+    # refine keeps the flags of copied modes and sets those of new ones
+    with pytest.warns(ad.SolverConvergenceWarning):
+        ref = ad.refine(r, _params(Nx_log2=6, Ny_log2=6, minN_log2=4, maxN_log2=4), met)
+    assert ref.converged is False

@@ -340,13 +340,16 @@ class AshDisperseResult:
     x: NDArray[np.float64]
     y: NDArray[np.float64]
     
+    unconverged: NDArray[np.bool_] | None
+
     _interpolated: bool
 
     def __init__(
             self, 
             params: Parameters, 
             C0_FT: NDArray[np.complex128], 
-            Cz_FT: NDArray[np.complex128]
+            Cz_FT: NDArray[np.complex128],
+            unconverged: NDArray[np.bool_] | None = None,
         ) -> None:
         """
         Create a AshDisperseResult instance from parameters and arrays of Fourier coefficients
@@ -359,6 +362,11 @@ class AshDisperseResult:
             Array of Fourier coefficients for ground-level concentration ordered as [y,x,grain]
         Cz_FT : np.ndarray
             Array of Fourier coefficients for z-level concentration ordered as [y,x,z,grain]
+        unconverged : np.ndarray of bool, optional
+            Mask, ordered as [y,x,grain] like C0_FT, of Fourier modes whose
+            vertical solve did not converge to the solver tolerance at the
+            largest Chebyshev size.  None if not known (e.g. results saved by
+            an older version).
 
         Notes
         -----
@@ -381,6 +389,14 @@ class AshDisperseResult:
 
         self.C0_FT = C0_FT
         self.Cz_FT = Cz_FT
+
+        if unconverged is not None:
+            unconverged = np.asarray(unconverged, dtype=np.bool_)
+            if unconverged.shape != C0_FT.shape:
+                raise ValueError(
+                    f"unconverged mask has shape {unconverged.shape}, expected {C0_FT.shape}"
+                )
+        self.unconverged = unconverged
 
         Nx = self.params.solver.Nx
         Ny = self.params.solver.Ny
@@ -428,8 +444,27 @@ class AshDisperseResult:
 
 
     @classmethod
-    def create(cls, params, C0_FT, Cz_FT) -> Self:
-        return cls(params, C0_FT, Cz_FT)
+    def create(cls, params, C0_FT, Cz_FT, unconverged=None) -> Self:
+        return cls(params, C0_FT, Cz_FT, unconverged)
+
+
+    @property
+    def unconverged_modes(self) -> NDArray[np.int64] | None:
+        """Number of Fourier modes per grain class whose vertical solve did
+        not converge at the largest Chebyshev size (None if not known)."""
+        if self.unconverged is None:
+            return None
+        return self.unconverged.sum(axis=(0, 1)).astype(np.int64)
+
+
+    @property
+    def converged(self) -> bool | None:
+        """True if every vertical solve converged to the solver tolerance,
+        False if any did not, None if not known (e.g. results saved by an
+        older version).  See unconverged_modes and unconverged."""
+        if self.unconverged is None:
+            return None
+        return not bool(self.unconverged.any())
 
 
     @property
@@ -540,11 +575,17 @@ class AshDisperseResult:
         Cz_FT[:half_Ny_old, :half_Nx_old, :, :] = self.Cz_FT[:half_Ny_old, :, :, :]
         Cz_FT[start_row:, :half_Nx_old, :, :] = self.Cz_FT[half_Ny_old:, :, :, :]
 
+        unconverged = None
+        if self.unconverged is not None:
+            unconverged = np.zeros((Ny, half_Nx, Ng), dtype=np.bool_)
+            unconverged[:half_Ny_old, :half_Nx_old, :] = self.unconverged[:half_Ny_old, :, :]
+            unconverged[start_row:, :half_Nx_old, :] = self.unconverged[half_Ny_old:, :, :]
+
         params = copy_parameters(self.params)
         params.solver.Nx_log2 = Nx_log2
         params.solver.Ny_log2 = Ny_log2
 
-        r = AshDisperseResult.create(params, C0_FT, Cz_FT)
+        r = AshDisperseResult.create(params, C0_FT, Cz_FT, unconverged)
         r._interpolated = True
 
         return r
@@ -590,7 +631,7 @@ class AshDisperseResult:
             params.model.xScale,
             params.model.yScale
         )
-        return AshDisperseResult.create(params, self.C0_FT, self.Cz_FT)
+        return AshDisperseResult.create(params, self.C0_FT, self.Cz_FT, self.unconverged)
 
 
     def change_duration(self, duration: float) -> AshDisperseResult:
@@ -627,7 +668,7 @@ class AshDisperseResult:
 
         params = copy_parameters(self.params)
         params.source.duration = duration
-        return AshDisperseResult.create(params, self.C0_FT, self.Cz_FT)
+        return AshDisperseResult.create(params, self.C0_FT, self.Cz_FT, self.unconverged)
 
 
     def change_grain_proportions(self, props: list[float]) -> AshDisperseResult:
@@ -681,7 +722,7 @@ class AshDisperseResult:
             params.model.xScale,
             params.model.yScale
         )
-        return AshDisperseResult.create(params, self.C0_FT, self.Cz_FT)
+        return AshDisperseResult.create(params, self.C0_FT, self.Cz_FT, self.unconverged)
 
 
     @classmethod
@@ -854,8 +895,11 @@ class AshDisperseResult:
 
         C0_FT = da.C0_FT_r.values + 1j*da.C0_FT_i.values
         Cz_FT = da.Cz_FT_r.values + 1j*da.Cz_FT_i.values
+        unconverged = None
+        if "unconverged" in da:
+            unconverged = da.unconverged.values.astype(np.bool_)
 
-        return AshDisperseResult.create(p, C0_FT, Cz_FT)
+        return AshDisperseResult.create(p, C0_FT, Cz_FT, unconverged)
 
     
     def to_netcdf(
@@ -904,6 +948,8 @@ class AshDisperseResult:
         - ``C0_FT_i``: Imag part of ``C0_FT`` with dims ``("ky", "kx", "grains")``  
         - ``Cz_FT_r``: Real part of ``Cz_FT`` with dims ``("ky", "kx", "z", "grains")``  
         - ``Cz_FT_i``: Imag part of ``Cz_FT`` with dims ``("ky", "kx", "z", "grains")``
+        - ``unconverged``: 1 where the vertical solve of a mode did not converge,
+          with dims ``("ky", "kx", "grains")`` (omitted if not known)
 
         **Coordinates**:
         - ``grains``: ``range(self.params.grains.bins)``
@@ -939,6 +985,9 @@ class AshDisperseResult:
                 C0_FT_i=(["ky", "kx", "grains"], np.imag(self.C0_FT)),
                 Cz_FT_r=(["ky", "kx", "z", "grains"], np.real(self.Cz_FT)),
                 Cz_FT_i=(["ky", "kx", "z", "grains"], np.imag(self.Cz_FT)),
+                **({} if self.unconverged is None else dict(
+                    unconverged=(["ky", "kx", "grains"], self.unconverged.astype(np.int8)),
+                )),
             ),
             coords=dict(
                 grains=np.arange(self.params.grains.bins),
