@@ -45,6 +45,59 @@ def set_threading_layer(thread_layer: str="tbb") -> None:
     return
 
 
+def get_physical_cores() -> int:
+    """
+    Get the number of physical CPU cores available to this process.
+
+    Simultaneous multithreading (hyperthreads) gives no speed-up for the
+    AshDisperse solver, whose per-mode work is dense floating-point linear
+    algebra, so the physical core count is the useful number of threads.
+
+    Uses psutil when installed, otherwise /proc/cpuinfo on Linux, and falls
+    back to the logical CPU count.  The result is capped by the CPU affinity
+    of the process where that is available.
+
+    :return: number of physical cores (at least 1)
+    :rtype: int
+    """
+    cores = None
+    try:
+        import psutil  # optional dependency
+        cores = psutil.cpu_count(logical=False)
+    except Exception:
+        cores = None
+
+    if not cores:
+        try:
+            pairs = set()
+            phys = core = None
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("physical id"):
+                        phys = line.split(":")[1].strip()
+                    elif line.startswith("core id"):
+                        core = line.split(":")[1].strip()
+                    elif not line.strip():
+                        if core is not None:
+                            pairs.add((phys, core))
+                        phys = core = None
+            if core is not None:
+                pairs.add((phys, core))
+            cores = len(pairs) or None
+        except OSError:
+            cores = None
+
+    if not cores:
+        cores = get_max_threads()
+
+    try:
+        cores = min(cores, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        pass
+
+    return max(1, int(cores))
+
+
 def get_max_threads() -> int:
     """
     Get the maximum number of threads available on the system
@@ -124,13 +177,14 @@ def set_default_threads(n=None):
     """
     Set the default number of threads for processing.
 
-    :param n: Number of threads to set. If None, sets to one less than the maximum available threads.
+    :param n: Number of threads to set. If None, sets to the number of physical
+              cores (hyperthreads do not speed up the solver).
     :type n: int or None, optional
 
     :example:
-        >>> ashdisperse.config.set_default_threads()      # Sets threads to max_threads - 1
-        >>> ashdisperse.config.get_default_threads()
-        >>> 7
+        >>> ashdisperse.config.set_default_threads()      # 4 on a 4-core/8-thread CPU
+        >>> ashdisperse.config.get_num_threads()
+        >>> 4
 
         >>> ashdisperse.config.set_default_threads(4)     # Sets threads to 4
         >>> ashdisperse.config.get_default_threads()
@@ -138,8 +192,7 @@ def set_default_threads(n=None):
     """
 
     if n is None:
-        max_threads = get_max_threads()
-        set_num_threads(max_threads - 1)
+        nb.set_num_threads(min(get_physical_cores(), nb.config.NUMBA_NUM_THREADS))
     else:
         set_num_threads(n)
     return
