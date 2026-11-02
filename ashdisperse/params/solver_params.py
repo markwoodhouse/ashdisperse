@@ -18,6 +18,7 @@ solver_spec["fft_tol"] = float64  # tolerance for fft terms
 solver_spec["meps"] = float64  # Machine epsilon
 solver_spec["met_cheb_N"] = int64  # points for Chebyshev smoothing of met profiles
 solver_spec["z_top"] = float64  # altitude (m) above which met profiles are held constant
+solver_spec["upper_map_factor"] = float64  # upper-domain map scale / settling-diffusion length
 
 
 @jitclass(solver_spec)
@@ -35,6 +36,7 @@ class SolverParameters:
         fft_tol=1e-10,
         met_cheb_N=33,
         z_top=50e3,
+        upper_map_factor=10.0,
     ):
         self.meps = np.finfo(np.float64).eps
 
@@ -60,6 +62,10 @@ class SolverParameters:
         # upper (semi-infinite) domain samples altitudes up to ~1e8 m where the
         # settling speed of coarse grains overflows.
         self.z_top = np.float64(z_top)
+        # The upper (z > H) domain uses z/H = 1 + ell (1 + x)/(1 - x) with
+        # ell = upper_map_factor * (settling-diffusion length), clipped to
+        # [1e-4, 1].  upper_map_factor <= 0 restores ell = 1.
+        self.upper_map_factor = np.float64(upper_map_factor)
 
     def validate(self):
         if self.domX < 0:
@@ -141,6 +147,7 @@ class SolverParameters:
         print("  Tolerance for FFT terms, fft_tol = ", self.fft_tol)
         print("  Chebyshev points for met profiles, met_cheb_N = ", self.met_cheb_N)
         print("  Met profiles held constant above z_top (m) = ", self.z_top)
+        print("  Upper-domain map factor, upper_map_factor = ", self.upper_map_factor)
         print("  Resolution in x, Nx = ", self.Nx, " (Nx_log2 = ", self.Nx_log2, ")")
         print("  Resolution in y, Ny = ", self.Ny, " (Ny_log2 = ", self.Ny_log2, ")")
         print("********************")
@@ -162,6 +169,7 @@ def _solver_dict(p):
         'fft_tol': float(p.fft_tol),
         'met_cheb_N': int(p.met_cheb_N),
         'z_top': float(p.z_top),
+        'upper_map_factor': float(p.upper_map_factor),
     }
 
 def _solver_params_equal(p1: SolverParameters, p2: SolverParameters) -> bool:
@@ -176,6 +184,7 @@ def _solver_params_equal(p1: SolverParameters, p2: SolverParameters) -> bool:
         (p1.plateau_factor == p2.plateau_factor) and
         (p1.fft_tol == p2.fft_tol) and
         (p1.met_cheb_N == p2.met_cheb_N) and
-        (p1.z_top == p2.z_top)
+        (p1.z_top == p2.z_top) and
+        (p1.upper_map_factor == p2.upper_map_factor)
     )
     return test

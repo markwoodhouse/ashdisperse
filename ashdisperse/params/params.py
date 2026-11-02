@@ -119,6 +119,7 @@ def copy_parameters(A):
         fft_tol=A.solver.fft_tol,
         met_cheb_N=A.solver.met_cheb_N,
         z_top=A.solver.z_top,
+        upper_map_factor=A.solver.upper_map_factor,
         Nx_log2=A.solver.Nx_log2,
         Ny_log2=A.solver.Ny_log2,
     )
@@ -161,6 +162,7 @@ def update_parameters(
     fft_tol=None,
     met_cheb_N=None,
     z_top=None,
+    upper_map_factor=None,
     Nx_log2=None,
     Ny_log2=None,
     grains=None,
@@ -199,6 +201,8 @@ def update_parameters(
         A.solver.met_cheb_N = met_cheb_N
     if z_top is not None:
         A.solver.z_top = z_top
+    if upper_map_factor is not None:
+        A.solver.upper_map_factor = upper_map_factor
     if Nx_log2 is not None:
         A.solver.Nx_log2 = Nx_log2
     if Ny_log2 is not None:
@@ -457,6 +461,7 @@ def parameters_from_dict(paramset: dict) -> Parameters:
         fft_tol=paramset["solver"]["fft_tol"],
         met_cheb_N=paramset["solver"].get("met_cheb_N", 33),
         z_top=paramset["solver"].get("z_top", 50e3),
+        upper_map_factor=paramset["solver"].get("upper_map_factor", 10.0),
         Nx_log2=paramset["solver"]["Nx_log2"],
         Ny_log2=paramset["solver"]["Ny_log2"],
     )

@@ -23,25 +23,25 @@ def lower_z(velocities, k):
         )
     N = velocities.N[k]
     z = np.empty((N), dtype=np.float64)
-    z[:N] = velocities.z[:N, 0, k]
+    z[:N] = velocities.z[:N, 0, k, 0]
     return z
 
 
 # @cc.export('upper_z', float64[::1](VelocityContainer_type, int64))
 @jit(
-    float64[::1](VelocityContainer_type, int64),
+    float64[::1](VelocityContainer_type, int64, int64),
     nopython=True,
     cache=True,
     fastmath=True,
 )
-def upper_z(velocities, k):
+def upper_z(velocities, k, grain_i):
     if k < 0 or k >= velocities.N.size:
         raise ValueError(
             "In upper_z, k must be in the range " + "[0, parameters.solver.chebIts]."
         )
     N = velocities.N[k] - 1
     z = np.empty((N), dtype=np.float64)
-    z[:N] = velocities.z[:N, 1, k]
+    z[:N] = velocities.z[:N, 1, k, grain_i]
     return z
 
 
@@ -59,25 +59,25 @@ def lower_U(velocities, k):
         )
     N = velocities.N[k]
     u = np.empty((N), dtype=np.float64)
-    u[:N] = velocities.U[:N, 0, k]
+    u[:N] = velocities.U[:N, 0, k, 0]
     return u
 
 
 # @cc.export('upper_U', float64[::1](VelocityContainer_type, int64))
 @jit(
-    float64[::1](VelocityContainer_type, int64),
+    float64[::1](VelocityContainer_type, int64, int64),
     nopython=True,
     cache=True,
     fastmath=True,
 )
-def upper_U(velocities, k):
+def upper_U(velocities, k, grain_i):
     if k < 0 or k >= velocities.N.size:
         raise ValueError(
             "In upper_U, k must be in the range " + "[0, parameters.solver.chebIts]."
         )
     N = velocities.N[k] - 1
     u = np.empty((N), dtype=np.float64)
-    u[:N] = velocities.U[:N, 1, k]
+    u[:N] = velocities.U[:N, 1, k, grain_i]
     return u
 
 
@@ -95,25 +95,25 @@ def lower_V(velocities, k):
         )
     N = velocities.N[k]
     v = np.empty((N), dtype=np.float64)
-    v[:N] = velocities.V[:N, 0, k]
+    v[:N] = velocities.V[:N, 0, k, 0]
     return v
 
 
 # @cc.export('upper_V', float64[::1](VelocityContainer_type, int64))
 @jit(
-    float64[::1](VelocityContainer_type, int64),
+    float64[::1](VelocityContainer_type, int64, int64),
     nopython=True,
     cache=True,
     fastmath=True,
 )
-def upper_V(velocities, k):
+def upper_V(velocities, k, grain_i):
     if k < 0 or k >= velocities.N.size:
         raise ValueError(
             "In upper_V, k must be in the range " + "[0, parameters.solver.chebIts]."
         )
     N = velocities.N[k] - 1
     v = np.empty((N), dtype=np.float64)
-    v[:N] = velocities.V[:N, 1, k]
+    v[:N] = velocities.V[:N, 1, k, grain_i]
     return v
 
 

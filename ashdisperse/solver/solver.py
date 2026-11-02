@@ -102,7 +102,9 @@ def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, Vel
     # for matching to lower domain
     dl2_m1 = cheb.cheb_dif_m1(l2_c)
 
-    a = dp1_p1/(dl2_m1-dr1_p1)
+    # Flux continuity at z = H.  d/dz = 2 d/dx below and (2/ell) d/dx above.
+    ell = VelocityContainer.ell[grain_i]
+    a = dp1_p1 / (dl2_m1 / ell - dr1_p1)
 
     Cheb_r1 = np.zeros(
         (parameters.output.Cheb_lower.shape[0], r1_c.size), dtype=np.complex128
@@ -119,10 +121,7 @@ def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, Vel
 
     conc_z_ft[:Nlow] = p1_v + a * r1_v
 
-    Cheb_l2 = np.zeros(
-        (parameters.output.Cheb_upper.shape[0], l2_c.size), dtype=np.complex128
-    )
-    Cheb_l2[:, : l2_c.size] = parameters.output.Cheb_upper[:, : l2_c.size]
+    Cheb_l2 = np.ascontiguousarray(VelocityContainer.Cheb_upper[grain_i, :, : l2_c.size])
     l2_v = Cheb_l2 @ l2_c
 
     conc_z_ft[Nlow:] = a * l2_v

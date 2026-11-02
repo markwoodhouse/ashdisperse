@@ -11,6 +11,7 @@ class SolverParameters:
     fft_tol: float
     met_cheb_N: int
     z_top: float
+    upper_map_factor: float
 
     def __init__(
         self,
@@ -25,6 +26,7 @@ class SolverParameters:
         fft_tol: float=1e-10,
         met_cheb_N: int=33,
         z_top: float=50e3,
+        upper_map_factor: float=10.0,
     ): ...
 
     def validate(self) -> int: ...

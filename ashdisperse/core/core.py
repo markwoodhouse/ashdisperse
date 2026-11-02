@@ -119,21 +119,26 @@ def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
     rPe = 1.0 / parameters.model.Peclet_number # reciprocal Peclet number
     Vratio = parameters.model.Velocity_ratio[grain_i]
     R = parameters.model.Diffusion_ratio
+    # map z/H = 1 + ell (1 + x)/(1 - x): d/dz = (1-x)^2/(2 ell) d/dx,
+    # d2/dz2 = (1-x)^4/(4 ell^2) d2/dx2 - (1-x)^3/(2 ell^2) d/dx
+    ell = velocities.ell[grain_i]
 
     for k, N in enumerate(cheby.N):
         x, Tn, dTn, d2Tn = cheby.get_cheb(k)
-        U = upper_U(velocities, k)
-        V = upper_V(velocities, k)
+        U = upper_U(velocities, k, grain_i)
+        V = upper_V(velocities, k, grain_i)
         Ws = upper_Ws(velocities, k)[:, grain_i]
         dWsdz = upper_dWsdz(velocities, k)[:, grain_i]
 
         c2 = np.zeros_like(x, dtype=np.complex128)
-        c2[:-1] = ((1 - x[:-1]) ** 4) / 4 * rPe * Vratio / R
+        c2[:-1] = ((1 - x[:-1]) ** 4) / (4 * ell * ell) * rPe * Vratio / R
         c2a = np.reshape(np.repeat(c2, N), (N, N))
         L2 = np.multiply(c2a, d2Tn)
 
         c1 = np.zeros_like(x, dtype=np.complex128)
-        c1[:-1] = ((1 - x[:-1]) ** 2) / 2 * (Ws - (1 - x[:-1]) * rPe * Vratio / R)
+        c1[:-1] = ((1 - x[:-1]) ** 2) / (2 * ell) * (
+            Ws - (1 - x[:-1]) * rPe * Vratio / R / ell
+        )
         c1[-1] = 0
         c1a = np.reshape(np.repeat(c1, N), (N, N))
         L1 = np.multiply(c1a, dTn)
