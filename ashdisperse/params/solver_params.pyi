@@ -1,3 +1,6 @@
+import numpy as np
+from numpy.typing import NDArray
+
 class SolverParameters:
     meps: float
     domX: float
@@ -13,6 +16,7 @@ class SolverParameters:
     z_top: float
     upper_map_factor: float
     element_factor: float
+    grain_N_log2: NDArray[np.int64]
 
     def __init__(
         self,
@@ -47,5 +51,11 @@ class SolverParameters:
     
     @property
     def chebIts(self) -> int: ...
+
+    def set_grain_N_log2(self, n_log2: list[int]) -> None: ...
+
+    def grain_Nx(self, grain_i: int) -> int: ...
+
+    def grain_Ny(self, grain_i: int) -> int: ...
 
     def describe(self): ...

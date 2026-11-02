@@ -20,6 +20,7 @@ solver_spec["met_cheb_N"] = int64  # points for Chebyshev smoothing of met profi
 solver_spec["z_top"] = float64  # altitude (m) above which met profiles are held constant
 solver_spec["upper_map_factor"] = float64  # upper-domain map scale / settling-diffusion length
 solver_spec["element_factor"] = float64  # lower-domain element size / settling-diffusion length
+solver_spec["grain_N_log2"] = int64[::1]  # optional per-grain horizontal resolution (log2); empty = global
 
 
 @jitclass(solver_spec)
@@ -74,6 +75,30 @@ class SolverParameters:
         # ground and below the plume top each get their own element.
         # element_factor <= 0 keeps a single lower domain.
         self.element_factor = np.float64(element_factor)
+        # Optional per-grain horizontal resolution, log2 of the number of
+        # Fourier modes in each direction (empty: every grain uses
+        # Nx_log2/Ny_log2).  Set with set_grain_N_log2().  A grain with
+        # grain_N_log2 = n is solved only for |kx|, |ky| <= 2^n / 2; on the
+        # global grid this is exactly its 2^n solution interpolated by
+        # zero-padding, so results combine as before.
+        self.grain_N_log2 = np.zeros(0, dtype=np.int64)
+
+    def set_grain_N_log2(self, n_log2):
+        """Set per-grain resolutions from an int64 array of log2 sizes, one
+        per grain class; an empty array restores the global resolution."""
+        self.grain_N_log2 = n_log2.copy()
+
+    def grain_Nx(self, grain_i):
+        """Number of Fourier modes in x used for grain class grain_i."""
+        if self.grain_N_log2.size == 0:
+            return 2**self.Nx_log2
+        return 2 ** min(self.grain_N_log2[grain_i], self.Nx_log2)
+
+    def grain_Ny(self, grain_i):
+        """Number of Fourier modes in y used for grain class grain_i."""
+        if self.grain_N_log2.size == 0:
+            return 2**self.Ny_log2
+        return 2 ** min(self.grain_N_log2[grain_i], self.Ny_log2)
 
     def validate(self):
         if self.domX < 0:
@@ -101,6 +126,13 @@ class SolverParameters:
             self.epsilon = self.meps
         if self.fft_tol < 0:
             raise ValueError("In SolverParameters, must have fft_tol>0")
+        for n in self.grain_N_log2:
+            if n < 2:
+                raise ValueError("In SolverParameters, must have grain_N_log2 >= 2")
+            if n > self.Nx_log2 or n > self.Ny_log2:
+                raise ValueError(
+                    "In SolverParameters, grain_N_log2 must not exceed Nx_log2 and Ny_log2; "
+                    "increase Nx_log2/Ny_log2 to the largest per-grain value")
         if self.met_cheb_N < 3:
             raise ValueError("In SolverParameters, must have met_cheb_N>=3")
         if self.z_top <= 0:
@@ -157,6 +189,8 @@ class SolverParameters:
         print("  Met profiles held constant above z_top (m) = ", self.z_top)
         print("  Upper-domain map factor, upper_map_factor = ", self.upper_map_factor)
         print("  Lower-domain element factor, element_factor = ", self.element_factor)
+        if self.grain_N_log2.size > 0:
+            print("  Per-grain resolution (log2), grain_N_log2 = ", self.grain_N_log2)
         print("  Resolution in x, Nx = ", self.Nx, " (Nx_log2 = ", self.Nx_log2, ")")
         print("  Resolution in y, Ny = ", self.Ny, " (Ny_log2 = ", self.Ny_log2, ")")
         print("********************")
@@ -180,6 +214,7 @@ def _solver_dict(p):
         'z_top': float(p.z_top),
         'upper_map_factor': float(p.upper_map_factor),
         'element_factor': float(p.element_factor),
+        'grain_N_log2': [int(n) for n in p.grain_N_log2],
     }
 
 def _solver_params_equal(p1: SolverParameters, p2: SolverParameters) -> bool:
@@ -196,6 +231,7 @@ def _solver_params_equal(p1: SolverParameters, p2: SolverParameters) -> bool:
         (p1.met_cheb_N == p2.met_cheb_N) and
         (p1.z_top == p2.z_top) and
         (p1.upper_map_factor == p2.upper_map_factor) and
-        (p1.element_factor == p2.element_factor)
+        (p1.element_factor == p2.element_factor) and
+        (list(p1.grain_N_log2) == list(p2.grain_N_log2))
     )
     return test

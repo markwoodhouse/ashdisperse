@@ -238,6 +238,31 @@ def _start_level(lev, j, i, k, Ny):
 
 
 @njit(
+    Tuple((int64[::1], int64[::1]))(Parameters_type, int64),
+    cache=True,
+)
+def _grain_caps(params, Ng):
+    """Largest mode indices solved for each grain class.
+
+    A grain with resolution Ng_x x Ng_y (params.solver.grain_Nx/grain_Ny,
+    the global grid unless solver.grain_N_log2 is set) keeps kx index
+    i <= Ng_x / 2 and ky pair index j <= Ng_y / 2 - 1, i.e. the rows
+    0 .. Ng_y/2 - 1 and Ny - Ng_y/2 .. Ny - 1: exactly the modes of an
+    Ng_x x Ng_y grid.  Each mode is an independent vertical solve with an
+    exact source coefficient, so this equals solving the grain on its own
+    grid and interpolating it to the global grid by zero-padding, except in
+    the Nyquist column i = Ng_x / 2, which the grain's own grid solves at
+    kx = -Ng_x/2 (grid_freq) and the global grid at +Ng_x/2.
+    """
+    capX = np.empty(Ng, dtype=np.int64)
+    capY = np.empty(Ng, dtype=np.int64)
+    for k in range(Ng):
+        capX[k] = params.solver.grain_Nx(k) // 2
+        capY[k] = params.solver.grain_Ny(k) // 2 - 1
+    return capX, capY
+
+
+@njit(
     Tuple((int64[::1], int64[::1], int64[::1]))(int64, int64),
     cache=True,
 )
@@ -338,6 +363,7 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
     # Pass 1: axis modes
     lev_lo = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
     lev_up = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
+    capX, capY = _grain_caps(params, Ng)
     ai, aj, _ = _axis_modes(Nx, Ny)
     NA = ai.size * Ng
     for idx in prange(NA):
@@ -345,6 +371,8 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
         k = Ng - 1 - (idx % Ng)
         i = ai[m]
         j = aj[m]
+        if (i > capX[k]) or (capY[k] < j < Ny - 1 - capY[k]):
+            continue  # beyond this grain's resolution
         c0, cz, klo, kup = ade_mode_solve_grain_from(
             k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities, 0, 0
         )
@@ -354,6 +382,9 @@ def ade_ft_system(kx, ky, fxy_f, cheby, params, velocities):
         lev_up[j, i, k] = kup
 
     Xstop, Ystop = _adaptive_stops(conc_0_fft, fft_tol, Nx, Ny)
+    for k in range(Ng):
+        Xstop[k] = min(Xstop[k], capX[k])
+        Ystop[k] = min(Ystop[k], capY[k])
 
     # Pass 2: interior modes, in pairs (j, Ny - 1 - j) for j >= 1
     half_Ny = (Ny + 1) // 2
@@ -429,6 +460,7 @@ def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, 
 
     lev_lo = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
     lev_up = np.zeros((Ny, Nx // 2 + 1, Ng), dtype=np.int64)
+    capX, capY = _grain_caps(params, Ng)
     ai, aj, _ = _axis_modes(Nx, Ny)
     NA = ai.size * Ng
     for idx in prange(NA):
@@ -436,6 +468,8 @@ def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, 
         k = Ng - 1 - (idx % Ng)
         i = ai[m]
         j = aj[m]
+        if (i > capX[k]) or (capY[k] < j < Ny - 1 - capY[k]):
+            continue  # beyond this grain's resolution
         c0, cz, klo, kup = ade_mode_solve_grain_from(
             k, kx[i], ky[j], fxy_f[j, i, k], cheby, params, velocities, 0, 0
         )
@@ -445,6 +479,9 @@ def ade_ft_refine(conc_0_fft_old, conc_z_fft_old, kx, ky, fxy_f, cheby, params, 
         lev_up[j, i, k] = kup
 
     Xstop, Ystop = _adaptive_stops(conc_0_fft, fft_tol, Nx, Ny)
+    for k in range(Ng):
+        Xstop[k] = min(Xstop[k], capX[k])
+        Ystop[k] = min(Ystop[k], capY[k])
 
     nI = half_Nx
     nJ = half_Ny - 1

@@ -64,6 +64,8 @@ class Parameters:
         _ = self.grains.validate()
         _ = self.emission.validate()
         _ = self.solver.validate()
+        if self.solver.grain_N_log2.size > 0 and self.solver.grain_N_log2.size != self.grains.bins:
+            raise ValueError("solver.grain_N_log2 must have one entry per grain class")
         _ = self.physical.validate()
         _ = self.met.validate()
         _ = self.output.validate()
@@ -124,6 +126,7 @@ def copy_parameters(A):
         Nx_log2=A.solver.Nx_log2,
         Ny_log2=A.solver.Ny_log2,
     )
+    new_A.solver.set_grain_N_log2(np.array(A.solver.grain_N_log2, dtype=np.int64))
     new_A.physical = PhysicalParameters(
         A.physical.Kappa_h, A.physical.Kappa_v, A.physical.g, A.physical.mu
     )
@@ -165,6 +168,7 @@ def update_parameters(
     z_top=None,
     upper_map_factor=None,
     element_factor=None,
+    grain_N_log2=None,
     Nx_log2=None,
     Ny_log2=None,
     grains=None,
@@ -207,6 +211,8 @@ def update_parameters(
         A.solver.upper_map_factor = upper_map_factor
     if element_factor is not None:
         A.solver.element_factor = element_factor
+    if grain_N_log2 is not None:
+        A.solver.set_grain_N_log2(np.array(grain_N_log2, dtype=np.int64))
     if Nx_log2 is not None:
         A.solver.Nx_log2 = Nx_log2
     if Ny_log2 is not None:
@@ -472,6 +478,10 @@ def parameters_from_dict(paramset: dict) -> Parameters:
     )
 
     
+    gn = paramset["solver"].get("grain_N_log2", [])
+    if len(gn) > 0:
+        params.solver.set_grain_N_log2(np.array(gn, dtype=np.int64))
+
     params.physical = PhysicalParameters(
         Kappa_h=paramset["physical"]["Kappa_h"],
         Kappa_v=paramset["physical"]["Kappa_v"],

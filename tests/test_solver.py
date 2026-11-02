@@ -154,3 +154,50 @@ def test_deposited_mass_independent_of_grid(met):
     a = ad.solve(_params(Nx_log2=5, Ny_log2=5), met)
     b = ad.solve(_params(Nx_log2=7, Ny_log2=7), met)
     assert np.allclose(a.C0_FT[0, 0, :], b.C0_FT[0, 0, :], rtol=1e-12, atol=0)
+
+
+def _pad_to(c, Ny, Nx):
+    """Place the modes of a smaller rfft-layout array on an Ny x (Nx/2+1) grid."""
+    ny, nxh = c.shape[0], c.shape[1]
+    out = np.zeros((Ny, Nx // 2 + 1) + c.shape[2:], dtype=c.dtype)
+    out[: ny // 2, :nxh] = c[: ny // 2]
+    out[Ny - ny // 2:, :nxh] = c[ny // 2:]
+    return out
+
+
+def test_per_grain_resolution_equals_own_grid(met):
+    set_num_threads(2)
+    mixed = ad.solve(_params(Nx_log2=6, Ny_log2=6, grain_N_log2=[5, 6]), met)
+    coarse = ad.solve(_params(Nx_log2=5, Ny_log2=5), met)
+    fine = ad.solve(_params(Nx_log2=6, Ny_log2=6), met)
+    # grain 0 at 32^2, zero-padded to 64^2.  Column 16 (Nyquist) is solved at
+    # kx = -16 on the 32 grid (grid_freq) and +16 here, so it is excluded.
+    keep = np.ones(33, dtype=bool)
+    keep[16] = False
+    assert np.array_equal(mixed.C0_FT[..., 0][:, keep], _pad_to(coarse.C0_FT[..., 0], 64, 64)[:, keep])
+    assert np.array_equal(mixed.Cz_FT[..., 0][:, keep], _pad_to(coarse.Cz_FT[..., 0], 64, 64)[:, keep])
+    assert np.all(mixed.C0_FT[:, 17:, 0] == 0)
+    # grain 1 at the global 64^2
+    assert np.array_equal(mixed.C0_FT[..., 1], fine.C0_FT[..., 1])
+    assert np.array_equal(mixed.Cz_FT[..., 1], fine.Cz_FT[..., 1])
+    # grains combine as before
+    _, _, tot_mixed = mixed.get_total_ashload(resolution=5000.0)
+    _, _, tot_fine = fine.get_total_ashload(resolution=5000.0)
+    assert tot_mixed.shape == tot_fine.shape
+    assert np.ma.max(np.abs(tot_mixed - tot_fine)) < 0.05 * np.ma.max(tot_fine)
+
+
+def test_grain_N_log2_validation(met):
+    with pytest.raises(ValueError):
+        ad.solve(_params(Nx_log2=5, Ny_log2=5, grain_N_log2=[5, 6]), met)   # exceeds global
+    with pytest.raises(ValueError):
+        ad.solve(_params(Nx_log2=6, Ny_log2=6, grain_N_log2=[5]), met)      # one per grain
+
+
+def test_grain_N_log2_parameter_file_roundtrip(tmp_path):
+    from ashdisperse.params import load_parameters, save_parameters
+    p = _params(Nx_log2=6, Ny_log2=6, grain_N_log2=[5, 6])
+    f = tmp_path / "p.toml"
+    save_parameters(p, file=str(f))
+    q = load_parameters(str(f))
+    assert list(q.solver.grain_N_log2) == [5, 6]
