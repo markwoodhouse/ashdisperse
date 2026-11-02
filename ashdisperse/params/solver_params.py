@@ -19,6 +19,7 @@ solver_spec["meps"] = float64  # Machine epsilon
 solver_spec["met_cheb_N"] = int64  # points for Chebyshev smoothing of met profiles
 solver_spec["z_top"] = float64  # altitude (m) above which met profiles are held constant
 solver_spec["upper_map_factor"] = float64  # upper-domain map scale / settling-diffusion length
+solver_spec["element_factor"] = float64  # lower-domain element size / settling-diffusion length
 
 
 @jitclass(solver_spec)
@@ -37,6 +38,7 @@ class SolverParameters:
         met_cheb_N=33,
         z_top=50e3,
         upper_map_factor=10.0,
+        element_factor=30.0,
     ):
         self.meps = np.finfo(np.float64).eps
 
@@ -66,6 +68,12 @@ class SolverParameters:
         # ell = upper_map_factor * (settling-diffusion length), clipped to
         # [1e-4, 1].  upper_map_factor <= 0 restores ell = 1.
         self.upper_map_factor = np.float64(upper_map_factor)
+        # For grains whose settling-diffusion length delta is small, the lower
+        # domain is split into elements [0, c delta], [c delta, 1 - c delta],
+        # [1 - c delta, 1] (z/H, c = element_factor) so that the layers at the
+        # ground and below the plume top each get their own element.
+        # element_factor <= 0 keeps a single lower domain.
+        self.element_factor = np.float64(element_factor)
 
     def validate(self):
         if self.domX < 0:
@@ -148,6 +156,7 @@ class SolverParameters:
         print("  Chebyshev points for met profiles, met_cheb_N = ", self.met_cheb_N)
         print("  Met profiles held constant above z_top (m) = ", self.z_top)
         print("  Upper-domain map factor, upper_map_factor = ", self.upper_map_factor)
+        print("  Lower-domain element factor, element_factor = ", self.element_factor)
         print("  Resolution in x, Nx = ", self.Nx, " (Nx_log2 = ", self.Nx_log2, ")")
         print("  Resolution in y, Ny = ", self.Ny, " (Ny_log2 = ", self.Ny_log2, ")")
         print("********************")
@@ -170,6 +179,7 @@ def _solver_dict(p):
         'met_cheb_N': int(p.met_cheb_N),
         'z_top': float(p.z_top),
         'upper_map_factor': float(p.upper_map_factor),
+        'element_factor': float(p.element_factor),
     }
 
 def _solver_params_equal(p1: SolverParameters, p2: SolverParameters) -> bool:
@@ -185,6 +195,7 @@ def _solver_params_equal(p1: SolverParameters, p2: SolverParameters) -> bool:
         (p1.fft_tol == p2.fft_tol) and
         (p1.met_cheb_N == p2.met_cheb_N) and
         (p1.z_top == p2.z_top) and
-        (p1.upper_map_factor == p2.upper_map_factor)
+        (p1.upper_map_factor == p2.upper_map_factor) and
+        (p1.element_factor == p2.element_factor)
     )
     return test

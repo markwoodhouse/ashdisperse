@@ -35,6 +35,75 @@ from ashdisperse.params import Parameters_type
 #     return conc_0_ft, conc_z_ft
 
 
+@njit(complex128(complex128[::1], float64), cache=True)
+def _cheb_val(c, x):
+    """Clenshaw evaluation of a complex Chebyshev series at x."""
+    b1 = 0.0 + 0.0j
+    b2 = 0.0 + 0.0j
+    for k in range(c.size - 1, 0, -1):
+        b0 = 2.0 * x * b1 - b2 + c[k]
+        b2 = b1
+        b1 = b0
+    return x * b1 - b2 + c[0]
+
+
+# Minimum element resolution: with fewer points the chop test can accept
+# series that are not yet resolved (seen as ~1e-6 errors in testing).
+_ELEMENT_MIN_N = 64
+
+
+@njit(
+    Tuple((complex128, complex128[::1], int64, int64))(
+        int64, float64, float64, complex128,
+        ChebContainer_type, Parameters_type, VelocityContainer_type,
+        int64, int64,
+    ),
+    cache=True,
+)
+def _mode_solve_elements(grain_i, kx, ky, fxy_ij, cheby, parameters, vel, k_lower, k_upper):
+    """Solve one Fourier mode with a spectral-element lower domain."""
+    z = parameters.output.altitudes / parameters.source.PlumeHeight
+    Nlow = 0
+    for iz in range(z.size):
+        if z[iz] <= 1:
+            Nlow += 1
+    conc_z_ft = np.zeros(z.size, dtype=np.complex128)
+
+    l2_c, k_up = core.UpperODE_from(kx, ky, grain_i, cheby, parameters, vel, k_upper)
+    ell = vel.ell[grain_i]
+    upper_flux = (2.0 / ell) * cheb.cheb_dif_m1(l2_c)
+
+    k0 = cheby.N.size - 1
+    for k in range(cheby.N.size):
+        if cheby.N[k] >= _ELEMENT_MIN_N:
+            k0 = k
+            break
+    if k_lower > k0:
+        k0 = k_lower
+
+    comb, sizes, Vv, k_lo = core.LowerElements(
+        kx, ky, fxy_ij, grain_i, cheby, parameters, vel, k0, upper_flux
+    )
+    E = vel.n_el[grain_i]
+
+    conc_0_ft = cheb.cheb_val_m1(np.ascontiguousarray(comb[0, : sizes[0]]))
+    for iz in range(Nlow):
+        e = 0
+        while e < E - 1 and z[iz] > vel.bps[grain_i, e + 1]:
+            e += 1
+        za = vel.bps[grain_i, e]
+        zb = vel.bps[grain_i, e + 1]
+        xe = 2.0 * (z[iz] - za) / (zb - za) - 1.0
+        conc_z_ft[iz] = _cheb_val(np.ascontiguousarray(comb[e, : sizes[e]]), xe)
+    for iz in range(z.size - Nlow):
+        l2_v = 0.0 + 0.0j
+        for n in range(l2_c.size):
+            l2_v += vel.Cheb_upper[grain_i, iz, n] * l2_c[n]
+        conc_z_ft[Nlow + iz] = Vv[E - 1] * l2_v
+
+    return conc_0_ft, conc_z_ft, k_lo, k_up
+
+
 @njit(
     Tuple((complex128, complex128[::1], int64, int64))(
         int64,
@@ -54,6 +123,11 @@ from ashdisperse.params import Parameters_type
 def ade_mode_solve_grain_from(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, VelocityContainer, k_lower, k_upper):
     """Solve one Fourier mode, starting the Chebyshev ladders at the given
     levels.  Returns surface value, profile, and the levels used."""
+
+    if VelocityContainer.n_el[grain_i] > 1:
+        return _mode_solve_elements(
+            grain_i, kx, ky, fxy_ij, ChebContainer, parameters, VelocityContainer, k_lower, k_upper
+        )
 
     z = np.zeros((parameters.output.Nz), dtype=np.float64)
     z = parameters.output.altitudes

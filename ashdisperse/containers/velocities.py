@@ -26,6 +26,58 @@ Vel_spec["Ws"] = float64[:, :, :, ::1]
 Vel_spec["dWs"] = float64[:, :, :, ::1]
 Vel_spec["ell"] = float64[::1]  # upper-domain map scale for each grain class
 Vel_spec["Cheb_upper"] = complex128[:, :, ::1]  # (grain, output z > H, maxN)
+# Lower-domain spectral elements (see element_breakpoints)
+Vel_spec["n_el"] = int64[::1]  # number of lower-domain elements per grain (1 or 3)
+Vel_spec["bps"] = float64[:, ::1]  # (grain, 4) element breakpoints in z/H
+# coefficients at element nodes: (maxN, element, level, grain)
+Vel_spec["el_z"] = float64[:, :, :, ::1]  # z/H
+Vel_spec["el_U"] = float64[:, :, :, ::1]
+Vel_spec["el_V"] = float64[:, :, :, ::1]
+Vel_spec["el_Ws"] = float64[:, :, :, ::1]
+Vel_spec["el_dWs"] = float64[:, :, :, ::1]  # d Ws / d(z/H)
+
+# Elements are used only if the layer element is thinner than this (z/H).
+ELEMENT_MAX_FRACTION = 0.1
+
+
+@njit(cache=True)
+def settling_lengths(parameters, Ws_H):
+    """Settling-diffusion length a / Ws(H) (in z/H) for each grain class,
+    with a = kappa_v / (Ws_scale H) the dimensionless vertical diffusivity.
+    Concentration changes over this length above the plume top, just below
+    it, and next to the ground."""
+    bins = parameters.grains.bins
+    delta = np.ones(bins, dtype=np.float64)
+    rPe = 1.0 / parameters.model.Peclet_number
+    R = parameters.model.Diffusion_ratio
+    for ig in range(bins):
+        a = rPe * parameters.model.Velocity_ratio[ig] / R
+        if Ws_H[ig] > 0:
+            delta[ig] = a / Ws_H[ig]
+    return delta
+
+
+@njit(cache=True)
+def element_breakpoints(parameters, delta):
+    """Lower-domain element layout per grain: (n_el, breakpoints).
+
+    With eta = element_factor * delta < ELEMENT_MAX_FRACTION the lower domain
+    is split at z/H = eta and 1 - eta, so the thin layers at the ground and
+    below the plume top lie in their own elements.  Otherwise one element."""
+    bins = parameters.grains.bins
+    n_el = np.ones(bins, dtype=np.int64)
+    bps = np.zeros((bins, 4), dtype=np.float64)
+    c = parameters.solver.element_factor
+    for ig in range(bins):
+        eta = c * delta[ig]
+        if c > 0 and eta < ELEMENT_MAX_FRACTION:
+            n_el[ig] = 3
+            bps[ig, 1] = eta
+            bps[ig, 2] = 1.0 - eta
+            bps[ig, 3] = 1.0
+        else:
+            bps[ig, 1] = 1.0
+    return n_el, bps
 
 
 @njit(cache=True)
@@ -135,6 +187,34 @@ class VelocityContainer:
         # map to that length clusters collocation points where the solution
         # varies.  ell = 1 recovers the original map z = 2H / (1 - x).
         self.ell = upper_map_scales(parameters, Ws_l[M - 1, :])
+
+        # Lower-domain elements: met coefficients at the element nodes,
+        # evaluated from the same smoothed profiles as the single domain.
+        delta = settling_lengths(parameters, Ws_l[M - 1, :])
+        self.n_el, self.bps = element_breakpoints(parameters, delta)
+        self.el_z = np.zeros((maxN, 3, chebIts, bins), dtype=np.float64)
+        self.el_U = np.zeros((maxN, 3, chebIts, bins), dtype=np.float64)
+        self.el_V = np.zeros((maxN, 3, chebIts, bins), dtype=np.float64)
+        self.el_Ws = np.zeros((maxN, 3, chebIts, bins), dtype=np.float64)
+        self.el_dWs = np.zeros((maxN, 3, chebIts, bins), dtype=np.float64)
+        for ig in range(bins):
+            if self.n_el[ig] == 1:
+                continue
+            cW = cheb_fit(np.ascontiguousarray(Ws_l[:, ig]))
+            cdW = cheb_deriv(cW)
+            for e in range(self.n_el[ig]):
+                za = self.bps[ig, e]
+                zb = self.bps[ig, e + 1]
+                for k in range(chebIts):
+                    N = 2 ** (k + minN_log2)
+                    xe = np.ascontiguousarray(x[:N, k])
+                    zt = za + 0.5 * (zb - za) * (xe + 1)
+                    xr = 2 * zt - 1  # reference coordinate of the smoothed profiles
+                    self.el_z[:N, e, k, ig] = zt
+                    self.el_U[:N, e, k, ig] = cheb_eval(cU_l, xr)
+                    self.el_V[:N, e, k, ig] = cheb_eval(cV_l, xr)
+                    self.el_Ws[:N, e, k, ig] = cheb_eval(cW, xr)
+                    self.el_dWs[:N, e, k, ig] = 2.0 * cheb_eval(cdW, xr)
 
         for k in range(0, chebIts):
             N = 2 ** (k + minN_log2)

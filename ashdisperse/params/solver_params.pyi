@@ -12,6 +12,7 @@ class SolverParameters:
     met_cheb_N: int
     z_top: float
     upper_map_factor: float
+    element_factor: float
 
     def __init__(
         self,
@@ -27,6 +28,7 @@ class SolverParameters:
         met_cheb_N: int=33,
         z_top: float=50e3,
         upper_map_factor: float=10.0,
+        element_factor: float=30.0,
     ): ...
 
     def validate(self) -> int: ...

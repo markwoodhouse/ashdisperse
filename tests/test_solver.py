@@ -98,3 +98,19 @@ def test_refine(met):
     # axis modes are always recomputed
     assert np.array_equal(r.C0_FT[:, 0, :], fresh.C0_FT[:, 0, :])
     assert np.array_equal(r.C0_FT[0, :, :], fresh.C0_FT[0, :, :])
+
+
+def test_lower_elements_match_single_domain_reference(met):
+    # 1 mm grains use three lower-domain elements by default; compare with a
+    # tightly converged single-domain solve (elements disabled, N <= 512).
+    set_num_threads(2)
+    el = ad.solve(_params(), met)
+    from ashdisperse.containers import ChebContainer, VelocityContainer
+    p = el.params
+    vel = VelocityContainer(p, met, ChebContainer(p).x)
+    assert vel.n_el[0] == 3
+    ref = ad.solve(_params(maxN_log2=9, epsilon=1e-12, element_factor=0.0), met)
+    for k in range(2):
+        scale = np.abs(ref.C0_FT[..., k]).max()
+        assert np.max(np.abs(el.C0_FT[..., k] - ref.C0_FT[..., k])) < 1e-8 * scale
+    assert np.max(np.abs(el.Cz_FT - ref.Cz_FT)) < 1e-7 * np.abs(ref.Cz_FT).max()
