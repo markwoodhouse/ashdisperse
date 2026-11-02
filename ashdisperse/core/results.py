@@ -2369,8 +2369,8 @@ class AshDisperseResult:
             if j < Nz:
                 data = self.Cz[:, :, Nz - j - 1, grain_i]
                 if np.nanmax(data) > vmin:
-                    # # data = np.ma.masked_where(data <= vmin, data)
-                    data[data <= vmin] = np.nan
+                    # mask without modifying the stored concentrations
+                    data = np.where(data <= vmin, np.nan, data)
                     if logscale:
                         CS = ax.contourf(
                             x,
@@ -2397,8 +2397,9 @@ class AshDisperseResult:
                 )
             elif j == Nz:
                 data = self.C0[:, :, grain_i]
-                data[data <= 1e-6] = np.nan
                 if np.nanmax(data) > vmin:
+                    # mask without modifying the stored concentrations
+                    data = np.where(data <= vmin, np.nan, data)
                     if logscale:
                         CS = ax.contourf(
                             x,
