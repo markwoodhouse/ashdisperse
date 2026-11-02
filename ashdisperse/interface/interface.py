@@ -656,9 +656,20 @@ def set_met(params_set, source="interface", **kwargs):
             raise RuntimeError(
                 "In met_set, 'met_filename' must be given if source='local'"
             )
-        met_filename = kwargs["met_filename"]
-        met_set = _get_local_netcdf_met(
-            met_filename, params_set.source.latitude, params_set.source.longitude
+        if "datetime" not in kwargs.keys():
+            raise RuntimeError(
+                "In met_set, 'datetime' must be given if source='local'"
+            )
+        met_datetime = kwargs["datetime"]
+        if isinstance(met_datetime, str):
+            met_datetime = string_to_datetime(met_datetime)
+        nc_data = _get_local_netcdf_met(kwargs["met_filename"])
+        # raises ValueError if the location or time is outside the file
+        met_set = _extract_local_netcdf_met(
+            nc_data,
+            params_set.source.latitude,
+            params_set.source.longitude,
+            met_datetime,
         )
     elif source == "gfs":
         if "datetime" not in kwargs.keys():
@@ -673,7 +684,7 @@ def set_met(params_set, source="interface", **kwargs):
             raise RuntimeError("In met_set, 'date' must be given if source='ecmwf'")
         date = kwargs["datetime"]
         met_datetime = string_to_datetime(date)
-        if "met_filename" in kwargs.items():
+        if "met_filename" in kwargs.keys():
             met_filename = kwargs["met_filename"]
         else:
             met_filename = "./MetData/era5_download.nc"
