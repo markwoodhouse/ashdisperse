@@ -11,6 +11,8 @@ import numpy as np
 from numba import float64, int64
 from numba.experimental import jitclass
 
+from ..spectral.cheb import cheb_deriv, cheb_eval, cheb_fit, cheb_lobatto
+
 # pylint: disable=C0103
 
 
@@ -72,59 +74,69 @@ class VelocityContainer:
         U_scale = parameters.met.U_scale
         Ws_scale = parameters.met.Ws_scale
         H = parameters.source.PlumeHeight
+
+        # Smooth representation of the met profiles in each sub-domain.
+        # The met data are piecewise linear in z; using them directly as ODE
+        # coefficients limits Chebyshev convergence to an algebraic rate, so
+        # the adaptive solver never resolves the solution.  Instead the
+        # profiles are interpolated by a Chebyshev polynomial on met_cheb_N
+        # Lobatto points of the computational coordinate x, and dWs/dz is the
+        # exact derivative of that interpolant.
+        M = parameters.solver.met_cheb_N
+        z_top = max(parameters.solver.z_top, 1.5 * H)
+        xm = cheb_lobatto(M)
+
+        # lower domain: z = H (x + 1) / 2
+        zl = 0.5 * (xm + 1) * H
+        # upper domain: z = 2 H / (1 - x), held constant above z_top
+        zu = np.empty(M, dtype=np.float64)
+        zu[: M - 1] = 2 * H / (1 - xm[: M - 1])
+        zu[M - 1] = z_top
+        zu = np.minimum(zu, z_top)
+
+        cU_l = cheb_fit(np.ascontiguousarray(Met.wind_U_array(zl, U_scale)))
+        cV_l = cheb_fit(np.ascontiguousarray(Met.wind_V_array(zl, U_scale)))
+        cU_u = cheb_fit(np.ascontiguousarray(Met.wind_U_array(zu, U_scale)))
+        cV_u = cheb_fit(np.ascontiguousarray(Met.wind_V_array(zu, U_scale)))
+        Ws_l = Met.settling_speed_array(parameters, zl, Ws_scale)
+        Ws_u = Met.settling_speed_array(parameters, zu, Ws_scale)
+        cW_l = np.zeros((M, bins), dtype=np.float64)
+        cW_u = np.zeros((M, bins), dtype=np.float64)
+        cdW_l = np.zeros((M, bins), dtype=np.float64)
+        cdW_u = np.zeros((M, bins), dtype=np.float64)
+        for ig in range(bins):
+            cW_l[:, ig] = cheb_fit(np.ascontiguousarray(Ws_l[:, ig]))
+            cW_u[:, ig] = cheb_fit(np.ascontiguousarray(Ws_u[:, ig]))
+            cdW_l[:, ig] = cheb_deriv(np.ascontiguousarray(cW_l[:, ig]))
+            cdW_u[:, ig] = cheb_deriv(np.ascontiguousarray(cW_u[:, ig]))
+
         for k in range(0, chebIts):
             N = 2 ** (k + minN_log2)
             self.N[k] = np.int64(N)
-            lower_z = np.zeros((N), dtype=np.float64)
-            lower_z[:N] = 0.5 * (x[:N, k] + 1) * H
-            self.z[:N, 0, k] = lower_z[:N]
-            self.U[:N, 0, k] = Met.wind_U_array(lower_z[:N], scale=U_scale)
-            self.V[:N, 0, k] = Met.wind_V_array(lower_z[:N], scale=U_scale)
-            self.Ws[:N, 0, k, :] = Met.settling_speed_array(
-                parameters, lower_z[:N], scale=Ws_scale
-            )
-            upper_z = np.zeros((N - 1), dtype=np.float64)
-            upper_z[: N - 1] = 2 / (1 - x[: N - 1, k]) * H
-            self.z[: N - 1, 1, k] = upper_z[: N - 1]
-            self.U[: N - 1, 1, k] = Met.wind_U_array(upper_z[: N - 1], scale=U_scale)
-            self.V[: N - 1, 1, k] = Met.wind_V_array(upper_z[: N - 1], scale=U_scale)
-            self.Ws[: N - 1, 1, k, :] = Met.settling_speed_array(
-                parameters, upper_z[: N - 1], scale=Ws_scale
-            )
-            self.fd_Ws(k, H)
+            xl = np.ascontiguousarray(x[:N, k])
+            xu = np.ascontiguousarray(x[: N - 1, k])
 
-    def fd_Ws(self, k, H):
-        """Compute derivate of settling speed.
+            self.z[:N, 0, k] = 0.5 * (xl + 1) * H
+            self.U[:N, 0, k] = cheb_eval(cU_l, xl)
+            self.V[:N, 0, k] = cheb_eval(cV_l, xl)
 
-        The first derivative dWs/dz is computed using centred difference, and
-        assigned to the appropriate slice of the class attribute dWs.
+            self.z[: N - 1, 1, k] = 2 / (1 - xu) * H
+            self.U[: N - 1, 1, k] = cheb_eval(cU_u, xu)
+            self.V[: N - 1, 1, k] = cheb_eval(cV_u, xu)
 
-        Args:
-            k (int): the approximation index.
-            H (float): the dimensional plume height (in metres).
-        """
-        N = self.N[k]
-        nG = self.Ws.shape[-1]
-        z_l = self.z[:N, 0, k] / H
-        W_l = self.Ws[:N, 0, k, :]
-
-        z_u = self.z[: N - 1, 1, k] / H
-        W_u = self.Ws[: N - 1, 1, k, :]
-
-        dW_l = np.empty((N, nG), dtype=np.float64)
-        dW_u = np.empty((N - 1, nG), dtype=np.float64)
-
-        for ig in range(nG):
-            dW_l[0, ig] = (W_l[1, ig] - W_l[0, ig]) / (z_l[1] - z_l[0])
-            dW_l[1:-1, ig] = (W_l[2:, ig] - W_l[:-2, ig]) / (z_l[2:] - z_l[:-2])
-            dW_l[-1, ig] = (W_l[-1, ig] - W_l[-2, ig]) / (z_l[-1] - z_l[-2])
-
-            dW_u[0, ig] = (W_u[1, ig] - W_u[0, ig]) / (z_u[1] - z_u[0])
-            dW_u[1:-1, ig] = (W_u[2:, ig] - W_u[:-2, ig]) / (z_u[2:] - z_u[:-2])
-            dW_u[-1, ig] = (W_u[-1, ig] - W_u[-2, ig]) / (z_u[-1] - z_u[-2])
-
-        self.dWs[:N, 0, k, :] = dW_l
-        self.dWs[: N - 1, 1, k, :] = dW_u
+            # d/dz (dimensionless z/H): lower dx/dz = 2, upper dx/dz = (1-x)^2/2
+            dxdz_u = 0.5 * (1 - xu) ** 2
+            for ig in range(bins):
+                self.Ws[:N, 0, k, ig] = cheb_eval(np.ascontiguousarray(cW_l[:, ig]), xl)
+                self.dWs[:N, 0, k, ig] = 2.0 * cheb_eval(
+                    np.ascontiguousarray(cdW_l[:, ig]), xl
+                )
+                self.Ws[: N - 1, 1, k, ig] = cheb_eval(
+                    np.ascontiguousarray(cW_u[:, ig]), xu
+                )
+                self.dWs[: N - 1, 1, k, ig] = dxdz_u * cheb_eval(
+                    np.ascontiguousarray(cdW_u[:, ig]), xu
+                )
 
 
 # pylint: disable=E1101

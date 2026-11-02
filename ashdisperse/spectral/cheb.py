@@ -54,6 +54,132 @@ def cheb(N):
     return x, T, dT, d2T
 
 
+@jit(float64[::1](int64), nopython=True, cache=True)
+def cheb_lobatto(M):
+    """Chebyshev-Lobatto points on [-1, 1] in ascending order (as in cheb)."""
+    t = np.pi * np.arange(M - 1, -1, -1) / (M - 1)
+    return np.cos(t)
+
+
+@jit(float64[::1](float64[::1]), nopython=True, cache=True)
+def cheb_fit(f):
+    """Chebyshev coefficients of the polynomial interpolating f at the
+    Chebyshev-Lobatto points returned by cheb_lobatto(f.size) (ascending x).
+
+    Uses the discrete cosine transform (type I) written out explicitly; M is
+    small (tens of points) so the O(M^2) cost is negligible.
+    """
+    M = f.size
+    n = M - 1
+    # reorder to descending x, i.e. theta_j = pi j / n
+    g = f[::-1].copy()
+    c = np.zeros(M, dtype=np.float64)
+    for k in range(M):
+        s = 0.0
+        for j in range(M):
+            w = 0.5 if (j == 0 or j == n) else 1.0
+            s += w * g[j] * np.cos(np.pi * k * j / n)
+        c[k] = 2.0 * s / n
+    c[0] *= 0.5
+    c[n] *= 0.5
+    return c
+
+
+@jit(float64[::1](float64[::1], float64[::1]), nopython=True, cache=True)
+def cheb_eval(c, x):
+    """Evaluate the Chebyshev series with coefficients c at points x (Clenshaw)."""
+    out = np.empty(x.size, dtype=np.float64)
+    M = c.size
+    for i in range(x.size):
+        xi = x[i]
+        b1 = 0.0
+        b2 = 0.0
+        for k in range(M - 1, 0, -1):
+            b0 = 2.0 * xi * b1 - b2 + c[k]
+            b2 = b1
+            b1 = b0
+        out[i] = xi * b1 - b2 + c[0]
+    return out
+
+
+@jit(float64[::1](float64[::1]), nopython=True, cache=True)
+def cheb_deriv(c):
+    """Chebyshev coefficients of the derivative of the series c."""
+    M = c.size
+    d = np.zeros(M, dtype=np.float64)
+    if M < 2:
+        return d
+    d[M - 2] = 2.0 * (M - 1) * c[M - 1]
+    for k in range(M - 3, -1, -1):
+        d[k] = d[k + 2] + 2.0 * (k + 1) * c[k + 1]
+    d[0] *= 0.5
+    return d
+
+
+@jit(int64(float64[::1], float64), nopython=True, cache=True)
+def standard_chop(a_abs, tol):
+    """Chop point for a Chebyshev series (Aurentz & Trefethen, 2017).
+
+    Port of Chebfun's standardChop.  Given absolute values of Chebyshev
+    coefficients, returns the number of coefficients to keep.  If the series
+    shows no plateau of size ~tol (i.e. it is not resolved), returns
+    a_abs.size, which callers treat as "not converged".
+    """
+    n = a_abs.size
+    cutoff = n
+    if tol >= 1.0:
+        return 1
+    if n < 17:
+        return n
+
+    # Step 1: monotone envelope, normalised
+    m = np.empty(n, dtype=np.float64)
+    m[n - 1] = a_abs[n - 1]
+    for j in range(n - 2, -1, -1):
+        m[j] = max(a_abs[j], m[j + 1])
+    if m[0] == 0.0:
+        return 1
+    env = m / m[0]
+
+    # Step 2: find a plateau
+    logtol = np.log(tol)
+    plateau_point = -1
+    j2 = 0
+    for j in range(1, n):  # j is 0-based; Chebfun's j is j+1
+        j2 = int(np.floor(1.25 * (j + 1) + 5.5)) - 1  # MATLAB round (half away from 0)
+        if j2 > n - 1:
+            return cutoff  # no plateau: not resolved
+        e1 = env[j]
+        e2 = env[j2]
+        r = 3.0 * (1.0 - np.log(e1) / logtol) if e1 > 0.0 else 0.0
+        if e1 == 0.0 or e2 / e1 > r:
+            plateau_point = j - 1
+            break
+    if plateau_point < 0:
+        return cutoff
+
+    # Step 3: fix the cutoff at a point where envelope + linear function is minimal
+    if env[plateau_point] == 0.0:
+        return plateau_point + 1
+    tol76 = tol ** (7.0 / 6.0)
+    j3 = 0
+    for j in range(n):
+        if env[j] >= tol76:
+            j3 += 1
+    jj2 = j2 + 1  # 1-based length
+    if j3 < jj2:
+        jj2 = j3 + 1
+        env[jj2 - 1] = tol76
+    best = 0
+    best_val = 1e300
+    for j in range(jj2):
+        v = np.log10(env[j]) + (-1.0 / 3.0) * np.log10(tol) * j / max(jj2 - 1, 1)
+        if v < best_val:
+            best_val = v
+            best = j
+    return max(best, 1)
+
+
 # @cc.export('ChebMat', complex128[:, ::1](int64, float64[::1]))
 @jit(complex128[:, ::1](int64, float64[::1]), nopython=True, cache=True)
 def ChebMat(N, x):
@@ -259,12 +385,15 @@ def cheb_tail_test(a_abs, tol_tail=1e-8, M=8):
 @jit(complex128[::1](complex128[::1], float64, float64), nopython=True, cache=True)
 def truncateCoeffs(coeffs, eps, plateau_factor):
     """
-    Truncate coefficients to those above plateau. Numba-friendly.
+    Truncate a Chebyshev series where it is resolved to relative tolerance eps.
+
+    Uses standard_chop (Aurentz & Trefethen 2017).  If the series is not
+    resolved, the full array is returned and callers move to a finer level.
 
     Inputs:
       coeffs : complex128[:]  -- full coefficient array
-      eps : float64           -- relative tolerance used by cheb_tail_test
-      plateau_factor : float64 -- factor above noise floor to treat as meaningful (e.g. 10.0)
+      eps : float64           -- relative tolerance
+      plateau_factor : float64 -- unused; kept for backwards compatibility
 
     Returns:
       truncated coeffs (1-d complex128 array)
@@ -272,54 +401,14 @@ def truncateCoeffs(coeffs, eps, plateau_factor):
     N = coeffs.size
     if N == 0:
         return np.zeros(0, dtype=np.complex128)
-
-    # abs values
     a = np.empty(N, dtype=np.float64)
-    max_a = 0.0
-    min_a = 1e300
     for i in range(N):
-        av = np.abs(coeffs[i])
-        a[i] = av
-        if av > max_a:
-            max_a = av
-        if av < min_a:
-            min_a = av
-
-    if max_a <= 0.0:
-        # all zero -> return a single zero coeff (or empty, choose single zero)
-        out = np.zeros(1, dtype=np.complex128)
-        out[0] = 0.0 + 0.0j
-        return out
-
-    converged, tail_ratio, est_error = cheb_tail_test(a, tol_tail=eps, M=8)
-
-    if converged:
-        # noise_floor: avoid tiny min_a by comparing with eps*max_a
-        noise_floor = min_a
-        # enforce lower bound
-        thresh = eps * max_a
-        if noise_floor < thresh:
-            noise_floor = thresh
-
-        # find last coefficient > plateau_factor * noise_floor
-        Ntrunc = 1  # default if nothing found
-        thr = plateau_factor * noise_floor
-        for i in range(N - 1, -1, -1):
-            if a[i] > thr:
-                Ntrunc = i + 1
-                break
-
-        # slice and return
-        out = np.empty(Ntrunc, dtype=np.complex128)
-        for i in range(Ntrunc):
-            out[i] = coeffs[i]
-        return out
-    else:
-        # not converged -> return original array (no truncation)
-        out = np.empty(N, dtype=np.complex128)
-        for i in range(N):
-            out[i] = coeffs[i]
-        return out
+        a[i] = np.abs(coeffs[i])
+    cutoff = standard_chop(a, eps)
+    out = np.empty(cutoff, dtype=np.complex128)
+    for i in range(cutoff):
+        out[i] = coeffs[i]
+    return out
 
     # if max_a > 0: # Should always be true, unless all coefficients are zero
     #     below_tol = (a < eps * max_a) * 1 # Find where coefficients are below tolerance

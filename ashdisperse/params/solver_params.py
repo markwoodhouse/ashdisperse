@@ -16,6 +16,8 @@ solver_spec["epsilon"] = float64  # tolerance for converged spectral series
 solver_spec["plateau_factor"] = float64  # factor above noise plateau to treat as meaningful (e.g. 10 for conservative, 3 for aggressive)
 solver_spec["fft_tol"] = float64  # tolerance for fft terms
 solver_spec["meps"] = float64  # Machine epsilon
+solver_spec["met_cheb_N"] = int64  # points for Chebyshev smoothing of met profiles
+solver_spec["z_top"] = float64  # altitude (m) above which met profiles are held constant
 
 
 @jitclass(solver_spec)
@@ -31,6 +33,8 @@ class SolverParameters:
         epsilon=1e-8,
         plateau_factor=10.0,
         fft_tol=1e-10,
+        met_cheb_N=33,
+        z_top=50e3,
     ):
         self.meps = np.finfo(np.float64).eps
 
@@ -46,6 +50,16 @@ class SolverParameters:
         self.epsilon = np.float64(epsilon)
         self.plateau_factor = np.float64(plateau_factor)
         self.fft_tol = np.float64(fft_tol)
+
+        # Met profiles (winds, settling speed) enter the vertical ODEs as
+        # coefficients.  They are represented by a Chebyshev interpolant on
+        # met_cheb_N points in each sub-domain so that the ODE coefficients are
+        # smooth and the Chebyshev solution converges geometrically.
+        self.met_cheb_N = np.int64(met_cheb_N)
+        # Above z_top the met profiles are held constant.  Without this the
+        # upper (semi-infinite) domain samples altitudes up to ~1e8 m where the
+        # settling speed of coarse grains overflows.
+        self.z_top = np.float64(z_top)
 
     def validate(self):
         if self.domX < 0:
@@ -73,6 +87,10 @@ class SolverParameters:
             self.epsilon = self.meps
         if self.fft_tol < 0:
             raise ValueError("In SolverParameters, must have fft_tol>0")
+        if self.met_cheb_N < 3:
+            raise ValueError("In SolverParameters, must have met_cheb_N>=3")
+        if self.z_top <= 0:
+            raise ValueError("In SolverParameters, must have z_top>0")
         # if self.fft_tol < 10 * self.meps:
         #     raise ValueError(
         #         f"In SolverParameters, must have fft_tol >= 10*machine epsilon = {10 * self.meps}"
@@ -121,6 +139,8 @@ class SolverParameters:
         print("  Tolerance for Chebyshev series, epsilon = ", self.epsilon)
         print("  Noise plateau factor for Chebyshev series, plateau_factor = ", self.plateau_factor)
         print("  Tolerance for FFT terms, fft_tol = ", self.fft_tol)
+        print("  Chebyshev points for met profiles, met_cheb_N = ", self.met_cheb_N)
+        print("  Met profiles held constant above z_top (m) = ", self.z_top)
         print("  Resolution in x, Nx = ", self.Nx, " (Nx_log2 = ", self.Nx_log2, ")")
         print("  Resolution in y, Ny = ", self.Ny, " (Ny_log2 = ", self.Ny_log2, ")")
         print("********************")
@@ -140,6 +160,8 @@ def _solver_dict(p):
         'epsilon': float(p.epsilon),
         'plateau_factor': float(p.plateau_factor),
         'fft_tol': float(p.fft_tol),
+        'met_cheb_N': int(p.met_cheb_N),
+        'z_top': float(p.z_top),
     }
 
 def _solver_params_equal(p1: SolverParameters, p2: SolverParameters) -> bool:
@@ -152,6 +174,8 @@ def _solver_params_equal(p1: SolverParameters, p2: SolverParameters) -> bool:
         (p1.Ny_log2 == p2.Ny_log2) and
         (p1.epsilon == p2.epsilon) and
         (p1.plateau_factor == p2.plateau_factor) and
-        (p1.fft_tol == p2.fft_tol)
+        (p1.fft_tol == p2.fft_tol) and
+        (p1.met_cheb_N == p2.met_cheb_N) and
+        (p1.z_top == p2.z_top)
     )
     return test

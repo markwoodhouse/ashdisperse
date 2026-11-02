@@ -9,6 +9,8 @@ class SolverParameters:
     epsilon: float
     plateau_factor: float
     fft_tol: float
+    met_cheb_N: int
+    z_top: float
 
     def __init__(
         self,
@@ -21,6 +23,8 @@ class SolverParameters:
         epsilon: float=1e-8,
         plateau_factor: float=10.0,
         fft_tol: float=1e-10,
+        met_cheb_N: int=33,
+        z_top: float=50e3,
     ): ...
 
     def validate(self) -> int: ...
