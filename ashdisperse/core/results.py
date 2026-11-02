@@ -310,15 +310,26 @@ def _sample_point_from_dataset(
         return fallback*np.ones_like(x)
 
 
-def _auto_vmin_vmax(data_max: float) -> tuple[float, float]:
-        
-        mag = np.log10(data_max)
-        mag = ceil(mag) if mag>0 else floor(mag)
-        vmax = nice_round_up(data_max, mag=10**mag)
+def _auto_vmin_vmax(data_max: float, decades: int = 3) -> tuple[float, float]:
+    """Choose colour-scale limits from the maximum of the data.
 
-        vmin = 10 ** (mag - 3)
-        
-        return (vmin, vmax)
+    vmax is data_max rounded up to one significant figure (e.g. 3.2 -> 4,
+    0.032 -> 0.04) and vmin is ``decades`` orders of magnitude below the
+    leading power of ten of data_max.
+
+    Raises:
+        ValueError: if data_max is not a positive finite number.
+    """
+    if not np.isfinite(data_max) or data_max <= 0:
+        raise ValueError(
+            f"Cannot set colour scale limits: maximum of data is {data_max}"
+        )
+
+    mag = floor(np.log10(data_max))
+    vmax = nice_round_up(data_max, mag=10.0**mag)
+    vmin = 10.0 ** (mag - decades)
+
+    return (vmin, vmax)
 
 
 class AshDisperseResult:
@@ -1991,7 +2002,7 @@ class AshDisperseResult:
         self,
         grain_i: int,
         logscale: bool = True,
-        vmin: float = 1e-6,
+        vmin: float | None = 1e-6,
         vmax: float | None =None,
         cmap: str | Colormap = "Purples",
         basemap: bool = True,
@@ -2009,6 +2020,9 @@ class AshDisperseResult:
         if isinstance(cmap, str):
             cmap = plt.get_cmap(cmap)
 
+        if vmin is None:
+            vmin, _ = _auto_vmin_vmax(np.nanmax(self.SettlingFlux[:, :, grain_i]))
+
         ds = self.raster_settlingflux_for_grain_class(
             grain_i, vmin=vmin, crs=webmerc["init"]
         )
@@ -2022,16 +2036,10 @@ class AshDisperseResult:
         x_intrp = interp1d(np.arange(len(x)), x)
         y_intrp = interp1d(np.arange(len(y)), y)
 
-        auto_vmin, auto_vmax = _auto_vmin_vmax(np.nanmax(data))
+        _, auto_vmax = _auto_vmin_vmax(np.nanmax(data))
 
         if vmax is None:
             vmax = auto_vmax
-        else:
-            mag = np.log10(vmax)
-            mag = ceil(mag) if mag>0 else floor(mag)
-
-        if vmin is None:
-            vmin = auto_vmin
         
         if logscale:
             levels = log_levels(vmin, vmax)
@@ -2121,7 +2129,7 @@ class AshDisperseResult:
         self,
         grain_i: int,
         logscale: bool=True,
-        vmin: float = 1e-6,
+        vmin: float | None = 1e-6,
         vmax: float | None = None,
         cmap: str | Colormap = "plasma",
         basemap: bool = True,
@@ -2139,6 +2147,9 @@ class AshDisperseResult:
         if isinstance(cmap, str):
             cmap = plt.get_cmap(cmap)
 
+        if vmin is None:
+            vmin, _ = _auto_vmin_vmax(np.nanmax(self.SettlingFlux[:, :, grain_i] * self.params.source.duration))
+
         ds = self.raster_ashload_for_grain_class(
             grain_i, vmin=vmin, crs=webmerc["init"]
         )
@@ -2152,16 +2163,10 @@ class AshDisperseResult:
         x_intrp = interp1d(np.arange(len(x)), x)
         y_intrp = interp1d(np.arange(len(y)), y)
 
-        auto_vmin, auto_vmax = _auto_vmin_vmax(np.nanmax(data))
+        _, auto_vmax = _auto_vmin_vmax(np.nanmax(data))
 
         if vmax is None:
             vmax = auto_vmax
-        else:
-            mag = np.log10(vmax)
-            if mag > 0:
-                mag = ceil(mag)
-            else:
-                mag = floor(mag)
 
         if logscale:
             levels = log_levels(vmin, vmax)
