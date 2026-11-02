@@ -2230,16 +2230,10 @@ class AshDisperseResult:
         if ashload is None:
             return None
 
-        maxload = np.nanmax(ashload["ash_load"])
-        mag = np.log10(maxload)
-        if mag > 0:
-            mag = ceil(mag)
-        else:
-            mag = floor(mag)
-        vmax = nice_round_up(maxload, mag=10**mag)
+        auto_vmin, vmax = _auto_vmin_vmax(np.nanmax(ashload["ash_load"]))
 
         if vmin is None:
-            vmin = 10 ** (mag - 3)
+            vmin = auto_vmin
 
         if cntrs_levels == "log":
             levels = log_levels(vmin, vmax)
@@ -2264,13 +2258,7 @@ class AshDisperseResult:
         Nz = self.params.output.Nz
         rows, cols = plot_rowscols(Nz + 1)
         fig, axes = plt.subplots(nrows=rows, ncols=cols, sharex=True, sharey=True)
-        maxc = np.nanmax(self.Cz[:, :, :, grain_i])
-        mag = np.log10(maxc)
-        if mag > 0:
-            mag = ceil(mag)
-        else:
-            mag = floor(mag)
-        vmax = nice_round_up(maxc, mag=10**mag)
+        _, vmax = _auto_vmin_vmax(np.nanmax(self.Cz[:, :, :, grain_i]))
 
         cbar_fig, cbar_ax = plt.subplots()
         if logscale:
