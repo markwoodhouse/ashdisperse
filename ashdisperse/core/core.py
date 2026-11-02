@@ -48,7 +48,7 @@ def assemble_operator(c2, c1, c0, Tn, dTn, d2Tn):
 # LowerODE
 # @cc.export('LowerODE', Tuple((complex128[::1], complex128[::1]))(float64, float64, complex128, int64, ChebContainer_type, Parameters_type, VelocityContainer_type))
 @jit(
-    Tuple((complex128[::1], complex128[::1]))(
+    Tuple((complex128[::1], complex128[::1], int64))(
         float64,
         float64,
         complex128,
@@ -56,12 +56,17 @@ def assemble_operator(c2, c1, c0, Tn, dTn, d2Tn):
         ChebContainer_type,
         Parameters_type,
         VelocityContainer_type,
+        int64,
     ),
     nopython=True,
     cache=True,
     fastmath=False,
 )
-def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
+def LowerODE_from(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, k_start):
+    """Lower-domain solve starting the Chebyshev ladder at level k_start.
+
+    Returns the particular and homogeneous coefficients and the level used.
+    """
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
     Ly = parameters.model.Ly[grain_i]
@@ -69,7 +74,9 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
     Vratio = parameters.model.Velocity_ratio[grain_i]
     R = parameters.model.Diffusion_ratio
 
-    for k, N in enumerate(cheby.N):
+    k_used = cheby.N.size - 1
+    for k in range(min(k_start, cheby.N.size - 1), cheby.N.size):
+        N = cheby.N[k]
         x, Tn, dTn, d2Tn = cheby.get_cheb(k)
         U = lower_U(velocities, k) # dimensionless U
         V = lower_V(velocities, k) # dimensionless V
@@ -111,27 +118,46 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
         co1 = truncateCoeffs(coeffs[:, 1].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
 
         if (co0.size < N) and (co1.size < N):
+            k_used = k
             break
 
+    return co0, co1, k_used
+
+
+@jit(
+    Tuple((complex128[::1], complex128[::1]))(
+        float64, float64, complex128, int64,
+        ChebContainer_type, Parameters_type, VelocityContainer_type,
+    ),
+    nopython=True,
+    cache=True,
+)
+def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
+    co0, co1, _ = LowerODE_from(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities, 0)
     return co0, co1
 
 
 # UpperODE
 # @cc.export('UpperODE', complex128[::1](float64, float64, int64, ChebContainer_type, Parameters_type, VelocityContainer_type))
 @jit(
-    complex128[::1](
+    Tuple((complex128[::1], int64))(
         float64,
         float64,
         int64,
         ChebContainer_type,
         Parameters_type,
         VelocityContainer_type,
+        int64,
     ),
     nopython=True,
     cache=True,
     fastmath=False,
 )
-def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
+def UpperODE_from(kx, ky, grain_i, cheby, parameters, velocities, k_start):
+    """Upper-domain solve starting the Chebyshev ladder at level k_start.
+
+    Returns the coefficients and the level used.
+    """
     pi = np.pi
     Lx = parameters.model.Lx[grain_i]
     Ly = parameters.model.Ly[grain_i]
@@ -142,7 +168,9 @@ def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
     # d2/dz2 = (1-x)^4/(4 ell^2) d2/dx2 - (1-x)^3/(2 ell^2) d/dx
     ell = velocities.ell[grain_i]
 
-    for k, N in enumerate(cheby.N):
+    k_used = cheby.N.size - 1
+    for k in range(min(k_start, cheby.N.size - 1), cheby.N.size):
+        N = cheby.N[k]
         x, Tn, dTn, d2Tn = cheby.get_cheb(k)
         U = upper_U(velocities, k, grain_i)
         V = upper_V(velocities, k, grain_i)
@@ -177,10 +205,22 @@ def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
         co = truncateCoeffs(coeffs[:, 0].flatten(), parameters.solver.epsilon, parameters.solver.plateau_factor)
 
         if co.size < N:
+            k_used = k
             break
 
-    # co = np.ascontiguousarray(new_coeffs[0].flatten())
+    return co, k_used
 
+
+@jit(
+    complex128[::1](
+        float64, float64, int64,
+        ChebContainer_type, Parameters_type, VelocityContainer_type,
+    ),
+    nopython=True,
+    cache=True,
+)
+def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
+    co, _ = UpperODE_from(kx, ky, grain_i, cheby, parameters, velocities, 0)
     return co
 
 
