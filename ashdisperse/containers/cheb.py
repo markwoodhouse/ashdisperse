@@ -19,6 +19,8 @@ Cheb_spec = OrderedDict()
 Cheb_spec['N'] = int64[::1]       # degrees of sets of the polynomial
 Cheb_spec['x'] = float64[:, ::1]  # collocation points as arrays
 # Chebyshev polynomials
+# stored level-first, (chebIts, maxN, maxN), so that each level's N x N block
+# is contiguous row by row
 Cheb_spec['Tn'] = float64[:, :, ::1]
 Cheb_spec['dTn'] = float64[:, :, ::1]   # first derivative
 Cheb_spec['d2Tn'] = float64[:, :, ::1]  # second derivatives
@@ -37,13 +39,13 @@ class ChebContainer():
         N (int[:]): Array of the degrees of the chebyshev approximations.
         x (float[:,:]): Array such that x[:N[k], k] contains the collocation
                         points for the chebyshev approximation at iterate k.
-        Tn (float[:,:,:]): Array such that Tn[:N[k], :N[k], k] contains the
+        Tn (float[:,:,:]): Array such that Tn[k, :N[k], :N[k]] contains the
                            chebyshev polynomials evaluated at the collocation
                            points for iterate k.
-        dTn (float[:,:,:]): Array such that dTn[:N[k], :N[k], k] contains the
+        dTn (float[:,:,:]): Array such that dTn[k, :N[k], :N[k]] contains the
                             derivative of the chebyshev polynomials evaluated
                             at the collocation points for iterate k.
-        d2Tn (float[:,:,:]): Array such that d2Tn[:N[k], :N[k], k] contains the
+        d2Tn (float[:,:,:]): Array such that d2Tn[k, :N[k], :N[k]] contains the
                              second derivative of the chebyshev polynomials
                              evaluated at the collocation points for iterate k.
     """
@@ -53,9 +55,9 @@ class ChebContainer():
         maxN = parameters.solver.maxN
         self.N = np.zeros((chebIts), dtype=np.int64)
         self.x = np.zeros((maxN, chebIts), dtype=np.float64)
-        self.Tn = np.zeros((maxN, maxN, chebIts), dtype=np.float64)
-        self.dTn = np.zeros((maxN, maxN, chebIts), dtype=np.float64)
-        self.d2Tn = np.zeros((maxN, maxN, chebIts), dtype=np.float64)
+        self.Tn = np.zeros((chebIts, maxN, maxN), dtype=np.float64)
+        self.dTn = np.zeros((chebIts, maxN, maxN), dtype=np.float64)
+        self.d2Tn = np.zeros((chebIts, maxN, maxN), dtype=np.float64)
 
         minN_log2 = parameters.solver.minN_log2
         for k in range(0, chebIts):
@@ -63,9 +65,9 @@ class ChebContainer():
             self.N[k] = np.int64(N)
             x, T, dT, d2T = cheb(N)
             self.x[:N, k] = x
-            self.Tn[:N, :N, k] = T
-            self.dTn[:N, :N, k] = dT
-            self.d2Tn[:N, :N, k] = d2T
+            self.Tn[k, :N, :N] = T
+            self.dTn[k, :N, :N] = dT
+            self.d2Tn[k, :N, :N] = d2T
 
     def get_cheb(self, k):
         """Get Chebyshev matrices.
@@ -84,9 +86,9 @@ class ChebContainer():
                 + '[0, parameters.solver.chebIts].')
         N = self.N[k]
         x = self.x[:N, k]
-        Tn = self.Tn[:N, :N, k]
-        dTn = self.dTn[:N, :N, k]
-        d2Tn = self.d2Tn[:N, :N, k]
+        Tn = self.Tn[k, :N, :N]
+        dTn = self.dTn[k, :N, :N]
+        d2Tn = self.d2Tn[k, :N, :N]
         return x, Tn, dTn, d2Tn
 
 

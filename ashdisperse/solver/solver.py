@@ -106,25 +106,23 @@ def ade_mode_solve_grain(grain_i, kx, ky, fxy_ij, ChebContainer, parameters, Vel
     ell = VelocityContainer.ell[grain_i]
     a = dp1_p1 / (dl2_m1 / ell - dr1_p1)
 
-    Cheb_r1 = np.zeros(
-        (parameters.output.Cheb_lower.shape[0], r1_c.size), dtype=np.complex128
-    )
-    Cheb_p1 = np.zeros(
-        (parameters.output.Cheb_lower.shape[0], p1_c.size), dtype=np.complex128
-    )
+    # Evaluate the series at the output altitudes directly from the stored
+    # Chebyshev matrices (no per-mode zero-padded copies).
+    T_low = parameters.output.Cheb_lower
+    for iz in range(Nlow):
+        p1_v = 0.0 + 0.0j
+        for n in range(p1_c.size):
+            p1_v += T_low[iz, n] * p1_c[n]
+        r1_v = 0.0 + 0.0j
+        for n in range(r1_c.size):
+            r1_v += T_low[iz, n] * r1_c[n]
+        conc_z_ft[iz] = p1_v + a * r1_v
 
-    Cheb_r1[:, : r1_c.size] = parameters.output.Cheb_lower[:, : r1_c.size]
-    Cheb_p1[:, : p1_c.size] = parameters.output.Cheb_lower[:, : p1_c.size]
-
-    r1_v = Cheb_r1 @ r1_c
-    p1_v = Cheb_p1 @ p1_c
-
-    conc_z_ft[:Nlow] = p1_v + a * r1_v
-
-    Cheb_l2 = np.ascontiguousarray(VelocityContainer.Cheb_upper[grain_i, :, : l2_c.size])
-    l2_v = Cheb_l2 @ l2_c
-
-    conc_z_ft[Nlow:] = a * l2_v
+    for iz in range(z.size - Nlow):
+        l2_v = 0.0 + 0.0j
+        for n in range(l2_c.size):
+            l2_v += VelocityContainer.Cheb_upper[grain_i, iz, n] * l2_c[n]
+        conc_z_ft[Nlow + iz] = a * l2_v
 
     conc_0_ft = p1_m1 + a*r1_m1 # Evaluate lower solution on Z=0 <=> x=-1
 

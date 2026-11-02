@@ -19,6 +19,32 @@ from .getters import (Source_z_dimless, lower_dWsdz, lower_U, lower_V,
 # cc.verbose = True
 
 
+@jit(
+    complex128[:, ::1](
+        float64[::1], float64[::1], complex128[::1],
+        float64[:, :], float64[:, :], float64[:, :],
+    ),
+    nopython=True,
+    cache=True,
+    fastmath=False,
+)
+def assemble_operator(c2, c1, c0, Tn, dTn, d2Tn):
+    """Collocation matrix L[r, s] = c2[r] d2Tn[r, s] + c1[r] dTn[r, s] + c0[r] Tn[r, s].
+
+    One pass over the N x N matrices; replaces np.repeat/reshape/multiply,
+    which allocated four temporary N x N arrays per call.
+    """
+    N = Tn.shape[0]
+    L = np.empty((N, N), dtype=np.complex128)
+    for r in range(N):
+        a2 = c2[r]
+        a1 = c1[r]
+        a0 = c0[r]
+        for s in range(N):
+            L[r, s] = (a2 * d2Tn[r, s] + a1 * dTn[r, s]) + a0 * Tn[r, s]
+    return L
+
+
 # LowerODE
 # @cc.export('LowerODE', Tuple((complex128[::1], complex128[::1]))(float64, float64, complex128, int64, ChebContainer_type, Parameters_type, VelocityContainer_type))
 @jit(
@@ -50,23 +76,16 @@ def LowerODE(kx, ky, fxy_ij, grain_i, cheby, parameters, velocities):
         Ws = lower_Ws(velocities, k)[:, grain_i] # dimensionless
         dWsdz = lower_dWsdz(velocities, k)[:, grain_i] # dimensionless
 
-        c2 = 4.0 * rPe * Vratio / R * np.ones_like(x, dtype=np.complex128)
-        c2a = np.reshape(np.repeat(c2, N), (N, N))
-        L2 = np.multiply(c2a, d2Tn)
-
+        c2 = 4.0 * rPe * Vratio / R * np.ones(N, dtype=np.float64)
         c1 = 2 * Ws
-        c1a = np.reshape(np.repeat(c1, N), (N, N))
-        L1 = np.multiply(c1a, dTn)
 
         c0 = (
             -1j * pi * (kx / Lx * U + ky / Ly * V)
             + dWsdz
             - pi * pi * rPe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
         )
-        c0a = np.reshape(np.repeat(c0, N), (N, N))
-        L0 = np.multiply(c0a, Tn)
 
-        L = L2 + L1 + L0
+        L = assemble_operator(c2, c1, c0, Tn, dTn, d2Tn)
 
         b = np.zeros((N, 2), dtype=np.complex128)
         fz = Source_z_dimless(0.5 * (x + 1), 
@@ -130,30 +149,22 @@ def UpperODE(kx, ky, grain_i, cheby, parameters, velocities):
         Ws = upper_Ws(velocities, k)[:, grain_i]
         dWsdz = upper_dWsdz(velocities, k)[:, grain_i]
 
-        c2 = np.zeros_like(x, dtype=np.complex128)
+        c2 = np.zeros(N, dtype=np.float64)
         c2[:-1] = ((1 - x[:-1]) ** 4) / (4 * ell * ell) * rPe * Vratio / R
-        c2a = np.reshape(np.repeat(c2, N), (N, N))
-        L2 = np.multiply(c2a, d2Tn)
 
-        c1 = np.zeros_like(x, dtype=np.complex128)
+        c1 = np.zeros(N, dtype=np.float64)
         c1[:-1] = ((1 - x[:-1]) ** 2) / (2 * ell) * (
             Ws - (1 - x[:-1]) * rPe * Vratio / R / ell
         )
-        c1[-1] = 0
-        c1a = np.reshape(np.repeat(c1, N), (N, N))
-        L1 = np.multiply(c1a, dTn)
 
-        c0 = np.zeros_like(x, dtype=np.complex128)
+        c0 = np.zeros(N, dtype=np.complex128)
         c0[:-1] = (
             -1j * pi * (kx / Lx * U + ky / Ly * V)
             + dWsdz
             - pi * pi * rPe / Vratio * ((kx / Lx) ** 2 + (ky / Ly) ** 2)
         )
-        c0[-1] = 0
-        c0a = np.reshape(np.repeat(c0, N), (N, N))
-        L0 = np.multiply(c0a, Tn)
 
-        L = L2 + L1 + L0
+        L = assemble_operator(c2, c1, c0, Tn, dTn, d2Tn)
         b = np.zeros((N, 1), dtype=np.complex128)
 
         L[0, :] = Tn[0, :]
